@@ -13,11 +13,12 @@ import os
 import time
 import argparse
 
-mem_pool = DeviceMemoryPool()
 
 parser = argparse.ArgumentParser()
 parser.add_argument('name')
 parser.add_argument('--lambda3',    type=float, default=1.0)
+parser.add_argument('--enable-at',  type=int,   default=1000)
+parser.add_argument('--epochs',     type=int,   default=None)
 
 
 class ConvAE(object):
@@ -223,6 +224,10 @@ class ConvAE(object):
         self.iter += 1
         return cost, Coef
 
+    def log_accuracy(self, accuracy):
+        summary = tf.Summary(value=[tf.Summary.Value(tag='accuracy', simple_value=accuracy)])
+        self.summary_writer.add_summary(summary, self.iter)
+
     def initlization(self):
         self.sess.run(self.init)
 
@@ -327,8 +332,8 @@ def post_proC(C, K, d, alpha):
     C = 0.5*(C + C.T)
     r = d*K + 1 # K=38, d=10
     t_begin = time.time()
-    # U, S, _ = svds(C,r,v0 = np.ones(C.shape[0]))
-    U, S, _ = svd_cuda(C, allocator=mem_pool)
+    U, S, _ = svds(C,r,v0 = np.ones(C.shape[0]))
+    #U, S, _ = svd_cuda(C, allocator=mem_pool)
     # take U and S from GPU
     # U = U[:, :r].get()
     # S = S[:r].get()
@@ -391,9 +396,6 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None):
         lr = 1.0e-3
         # fine-tune network
         print 'Optimize for {} steps'.format(num_epochs)
-        clustered = False
-        assert num_epochs == 1000, 'Currently hard-coded for 1000 epochs'
-        num_epochs += 2000 # add 2000 GAN epochs
         for epoch in xrange(1, num_epochs+1):
             if epoch % 10 == 0:
                 print 'epoch {}'.format(epoch)
@@ -401,7 +403,7 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None):
             First 1000 epochs, just train on eqn3
             Subsequent epochs, train on eqn3plus
             """
-            if epoch <= 1000:
+            if epoch <= args.enable_at: # 1000
                 cost, Coef = CAE.partial_fit_eqn3(subset_imgs, lr)
             else:
                 CAE.partial_fit_disc(subset_imgs, y_x, lr)  # discriminator step discriminator
@@ -417,6 +419,7 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None):
                 acc_x = 1 - missrate_x
                 print "experiment: %d" % i, "our accuracy: %.4f" % acc_x
                 print 'post processing time: {}'.format(t_end - t_begin)
+                CAE.log_accuracy(acc_x)
                 clustered = True
         acc_.append(acc_x)
 
@@ -483,7 +486,7 @@ if __name__ == '__main__':
                 model_path=model_path, restore_path=restore_path, logs_path=logs_path)
 
         # perform optimization
-        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class)
+        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=args.epochs)
         # add result to list
         avg.append(avg_i)
         med.append(med_i)
