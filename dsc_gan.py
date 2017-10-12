@@ -15,10 +15,10 @@ import argparse
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('name')
-parser.add_argument('--lambda3',    type=float, default=1.0)
-parser.add_argument('--enable-at',  type=int,   default=1000)
-parser.add_argument('--epochs',     type=int,   default=None)
+parser.add_argument('name')                                     # name of experiment, used for creating log directory
+parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan loss
+parser.add_argument('--enable-at',  type=int,   default=1000)   # enable gan loss at epoch
+parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train for. Defaults to 1000
 
 
 class ConvAE(object):
@@ -47,6 +47,7 @@ class ConvAE(object):
         weights = self.make_weights()
         disc_weights  = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
         other_weights = [v for v in tf.trainable_variables() if v not in disc_weights]
+        ae_weights    = [v for v in other_weights            if not v.name=='Coef']
 
         # run input through encoder
         latent, shape = self.encoder(self.x, weights)
@@ -68,6 +69,11 @@ class ConvAE(object):
         self.loss_selfexpress = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(z_c, z), 2.0))
         self.loss_eqn3 = self.loss_recon + lambda1 * self.loss_sparsity + lambda2 * self.loss_selfexpress
         self.optimizer_eqn3 = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3, var_list=other_weights)
+
+        # pretraining loss
+        self.x_r_pre = self.decoder(latent, weights, shape)
+        self.loss_recon_pre = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r_pre, self.x), 2.0))
+        self.optimizer_pre = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_recon_pre, var_list=ae_weights)
 
         # discriminator loss
         self.y_x    = tf.placeholder(tf.int32, [None])
@@ -223,6 +229,10 @@ class ConvAE(object):
         self.summary_writer.add_summary(summary, self.iter)
         self.iter += 1
         return cost, Coef
+
+    def partial_fit_pretrain(self, X, lr):
+        cost = self.sess.run([self.loss_recon_pre], feed_dict={self.x:X})
+        return cost
 
     def log_accuracy(self, accuracy):
         summary = tf.Summary(value=[tf.Summary.Value(tag='accuracy', simple_value=accuracy)])
