@@ -1,4 +1,4 @@
-# Deep-subspace-clustering-networks
+# Deep Subspace Clustering + GAN
 
 Tensorflow implementation of our NIPS'17 paper:
 
