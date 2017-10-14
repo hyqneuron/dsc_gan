@@ -20,3 +20,10 @@ pip install tensorboard
 tensorboard useful for visualization only.
 
 
+# Notes on parameter tuning
+
+Training result seems to be highly dependent on quality of pre-trained model. For a particular pretrained model,
+finetuning achieves very consistent result. But if we repeat pre-training everytime, final finetuning result
+has significant variance.
+
+

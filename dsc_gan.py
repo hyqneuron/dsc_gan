@@ -16,84 +16,108 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('name')                                     # name of experiment, used for creating log directory
+parser.add_argument('--lambda1',    type=float, default=1.0)
 parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan loss
-parser.add_argument('--enable-at',  type=int,   default=1000)   # enable gan loss at epoch
-parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train for. Defaults to 1000
+parser.add_argument('--pretrain',   type=int,   default=0)      # number of iterations of pretraining
+parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train on eqn3 and eqn3plus 
+parser.add_argument('--enable-at',  type=int,   default=1000)   # epoch at which to enable eqn3plus
+parser.add_argument('--dataset',    type=str,   default='yaleb', choices=['yaleb', 'orl'])
+
+"""
+Example launch commands:
+
+CUDA_VISIBLE_DEVICES=0 python dsc_gan.py yaleb_run1 --pretrain 60000 --epochs 4000 --enable-at 3000 --dataset yaleb
+    pretrain for 60000 iterations first, then train on eqn3 for 3000 epochs, and on eqn3plus for 1000 epochs
+
+CUDA_VISIBLE_DEVICES=0 python dsc_gan.py orl_run1   --pretrain 10000 --epochs 4000 --enable-at 2000 --dataset orl
+    pretrain for 10000 iterations first, then train on eqn3 for 2000 epochs, and on eqn3plus for 2000 epochs
+
+"""
 
 
 class ConvAE(object):
     def __init__(self,
-            n_input, n_hidden, kernel_size, n_class,
+            n_input, n_hidden, kernel_size, n_class, n_sample_perclass,
             lambda1, lambda2, lambda3, batch_size,
             reg=None, disc_bound=0.02,
             model_path = None, restore_path = None,
             logs_path = 'logs'):
         self.n_class = n_class
         self.n_input = n_input
-        self.kernel_size = kernel_size
         self.n_hidden = n_hidden
+        self.kernel_size = kernel_size
+        self.n_sample_perclass = n_sample_perclass
         self.batch_size = batch_size
         self.reg = reg
         self.model_path = model_path
         self.restore_path = restore_path
         self.iter = 0
-        latent_size = 1080
 
         #input required to be fed
         self.x = tf.placeholder(tf.float32, [None, n_input[0], n_input[1], 1])
         self.learning_rate = tf.placeholder(tf.float32, [])
 
         # weights
-        weights = self.make_weights()
-        disc_weights  = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
-        other_weights = [v for v in tf.trainable_variables() if v not in disc_weights]
-        ae_weights    = [v for v in other_weights            if not v.name=='Coef']
+        weight_dict = self.make_weights()
+        weight_list = weight_dict.values()
+        ae_weights    = [v for v in weight_list if v.name!='Coef']
+        self.ae_weight_norm = tf.sqrt(sum([tf.norm(v, 2)**2 for v in ae_weights]))
 
         # run input through encoder
-        latent, shape = self.encoder(self.x, weights)
+        latent, shape = self.encoder(self.x, weight_dict)
+        self.latent_shape = latent.shape
+        self.latent_size  = reduce(lambda x,y:int(x)*int(y), self.latent_shape[1:], 1)
+        print self.latent_size
 
         # self-expressive layer
         z = tf.reshape(latent, [batch_size, -1])
-        Coef = weights['Coef']
+        Coef = weight_dict['Coef']
+        #Coef = Coef * (1-tf.eye(batch_size)) # slightly reduces accuracy
         z_c = tf.matmul(Coef,z)
         self.Coef = Coef
         latent_c = tf.reshape(z_c, tf.shape(latent)) # petential problem here
         self.z = z
 
         # run self-expressive's output through decoder
-        self.x_r = self.decoder(latent_c, weights, shape)
+        self.x_r = self.decoder(latent_c, weight_dict, shape)
 
         # Eqn 3 loss
         self.loss_recon = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r, self.x), 2.0))
         self.loss_sparsity = tf.reduce_sum(tf.pow(self.Coef,2.0))
         self.loss_selfexpress = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(z_c, z), 2.0))
         self.loss_eqn3 = self.loss_recon + lambda1 * self.loss_sparsity + lambda2 * self.loss_selfexpress
-        self.optimizer_eqn3 = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3, var_list=other_weights)
+        self.optimizer_eqn3 = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3, var_list=weight_list)
 
         # pretraining loss
-        self.x_r_pre = self.decoder(latent, weights, shape)
+        self.x_r_pre = self.decoder(latent, weight_dict, shape)
         self.loss_recon_pre = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r_pre, self.x), 2.0))
-        self.optimizer_pre = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_recon_pre, var_list=ae_weights)
+        self.loss_reg_pre   = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES) # weight decay
+        self.loss_pretrain  = self.loss_recon_pre + self.loss_reg_pre
+        self.optimizer_pre = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_pretrain, var_list=ae_weights)
 
         # discriminator loss
+        disc_weights = self.make_disc_weights()
         self.y_x    = tf.placeholder(tf.int32, [None])
         self.z_real = z
-        self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, 64)
-        self.score_disc = self.score_discriminator(self.z_real, self.z_fake, weights)
-        self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights)
-        self.clip_weight = [w.assign(tf.clip_by_value(w, -disc_bound, disc_bound)) for w in disc_weights]
+        self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, self.n_sample_perclass)
+        self.score_disc = self.score_discriminator(self.z_real, self.z_fake, disc_weights)
+        self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights.values())
+        self.clip_weight = [w.assign(tf.clip_by_value(w, -disc_bound, disc_bound)) for w in disc_weights.values()]
 
         # Eqn 3 + generator loss
         self.loss_eqn3plus = self.loss_eqn3 + lambda3 * self.score_disc
-        self.optimizer_eqn3plus = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3plus, var_list=other_weights)
+        self.optimizer_eqn3plus = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3plus, var_list=weight_list)
 
         # finalize stuffs
+        s0 = tf.summary.scalar("loss_recon_pre",   self.loss_recon_pre / batch_size) # 13372
         s1 = tf.summary.scalar("loss_recon",       self.loss_recon)
         s2 = tf.summary.scalar("loss_sparsity",    self.loss_sparsity)
         s3 = tf.summary.scalar("loss_selfexpress", self.loss_selfexpress)
         s4 = tf.summary.scalar("score_disc",       self.score_disc)
-        self.summaryop_eqn3     = tf.summary.merge([s1, s2, s3])
-        self.summaryop_eqn3plus = tf.summary.merge([s1, s2, s3, s4])
+        s5 = tf.summary.scalar("ae_l2_norm",       self.ae_weight_norm)              # 29.8
+        self.summaryop_eqn3     = tf.summary.merge([s1, s2, s3, s5])
+        self.summaryop_eqn3plus = tf.summary.merge([s1, s2, s3, s4, s5])
+        self.summaryop_pretrain = tf.summary.merge([s0, s5])
         self.init = tf.global_variables_initializer()
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True  # stop TF from eating up all GPU RAM 
@@ -101,47 +125,50 @@ class ConvAE(object):
         self.sess = tf.InteractiveSession(config=config)
         self.sess.run(self.init)
         self.saver = tf.train.Saver([v for v in tf.trainable_variables() if not (v.name.startswith("Coef") or v.name.startswith('disc'))])
-        self.summary_writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph())
+        self.summary_writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph(), flush_secs=20)
 
     def make_weights(self):
-        all_weights = dict()
+        weights = dict()
         with tf.device('/gpu:0'):
             # AE weights + C weights
-            all_weights['enc_w0'] = tf.get_variable("enc_w0", shape=[self.kernel_size[0], self.kernel_size[0], 1, self.n_hidden[0]],
+            weights['enc_w0'] = tf.get_variable("enc_w0", shape=[self.kernel_size[0], self.kernel_size[0], 1, self.n_hidden[0]],
                 initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            all_weights['enc_b0'] = tf.Variable(tf.zeros([self.n_hidden[0]], dtype = tf.float32))
+            weights['enc_b0'] = tf.Variable(tf.zeros([self.n_hidden[0]], dtype = tf.float32))
 
-            all_weights['enc_w1'] = tf.get_variable("enc_w1", shape=[self.kernel_size[1], self.kernel_size[1], self.n_hidden[0],self.n_hidden[1]],
+            weights['enc_w1'] = tf.get_variable("enc_w1", shape=[self.kernel_size[1], self.kernel_size[1], self.n_hidden[0],self.n_hidden[1]],
                 initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            all_weights['enc_b1'] = tf.Variable(tf.zeros([self.n_hidden[1]], dtype = tf.float32))
+            weights['enc_b1'] = tf.Variable(tf.zeros([self.n_hidden[1]], dtype = tf.float32))
 
-            all_weights['enc_w2'] = tf.get_variable("enc_w2", shape=[self.kernel_size[2], self.kernel_size[2], self.n_hidden[1],self.n_hidden[2]],
+            weights['enc_w2'] = tf.get_variable("enc_w2", shape=[self.kernel_size[2], self.kernel_size[2], self.n_hidden[1],self.n_hidden[2]],
                 initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            all_weights['enc_b2'] = tf.Variable(tf.zeros([self.n_hidden[2]], dtype = tf.float32))
+            weights['enc_b2'] = tf.Variable(tf.zeros([self.n_hidden[2]], dtype = tf.float32))
 
-            all_weights['Coef']   = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size],tf.float32), name = 'Coef')
+            weights['Coef']   = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size],tf.float32), name = 'Coef')
 
-            all_weights['dec_w0'] = tf.get_variable("dec_w0", shape=[self.kernel_size[2], self.kernel_size[2], self.n_hidden[1],self.n_hidden[2]],
+            weights['dec_w0'] = tf.get_variable("dec_w0", shape=[self.kernel_size[2], self.kernel_size[2], self.n_hidden[1],self.n_hidden[2]],
                 initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            all_weights['dec_b0'] = tf.Variable(tf.zeros([self.n_hidden[1]], dtype = tf.float32))
+            weights['dec_b0'] = tf.Variable(tf.zeros([self.n_hidden[1]], dtype = tf.float32))
 
-            all_weights['dec_w1'] = tf.get_variable("dec_w1", shape=[self.kernel_size[1], self.kernel_size[1], self.n_hidden[0],self.n_hidden[1]],
+            weights['dec_w1'] = tf.get_variable("dec_w1", shape=[self.kernel_size[1], self.kernel_size[1], self.n_hidden[0],self.n_hidden[1]],
                 initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            all_weights['dec_b1'] = tf.Variable(tf.zeros([self.n_hidden[0]], dtype = tf.float32))
+            weights['dec_b1'] = tf.Variable(tf.zeros([self.n_hidden[0]], dtype = tf.float32))
 
-            all_weights['dec_w2'] = tf.get_variable("dec_w2", shape=[self.kernel_size[0], self.kernel_size[0],1, self.n_hidden[0]],
+            weights['dec_w2'] = tf.get_variable("dec_w2", shape=[self.kernel_size[0], self.kernel_size[0],1, self.n_hidden[0]],
                 initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            all_weights['dec_b2'] = tf.Variable(tf.zeros([1], dtype = tf.float32))
+            weights['dec_b2'] = tf.Variable(tf.zeros([1], dtype = tf.float32))
+        return weights
 
+    def make_disc_weights(self):
+        weights = dict()
+        with tf.device('/gpu:0'):
             # discriminator weights
-            all_weights['disc_w0'] = tf.get_variable('disc_w0', shape=[1080, 200], initializer=layers.xavier_initializer())
-            all_weights['disc_b0'] = tf.get_variable('disc_b0', shape=[200],       initializer=tf.zeros_initializer())
-            all_weights['disc_w1'] = tf.get_variable('disc_w1', shape=[200 , 50 ], initializer=layers.xavier_initializer())
-            all_weights['disc_b1'] = tf.get_variable('disc_b1', shape=[50 ],       initializer=tf.zeros_initializer())
-            all_weights['disc_w2'] = tf.get_variable('disc_w2', shape=[50  , 1  ], initializer=layers.xavier_initializer())
+            weights['disc_w0'] = tf.get_variable('disc_w0', shape=[self.latent_size, 200], initializer=layers.xavier_initializer())
+            weights['disc_b0'] = tf.get_variable('disc_b0', shape=[200],       initializer=tf.zeros_initializer())
+            weights['disc_w1'] = tf.get_variable('disc_w1', shape=[200 , 50 ], initializer=layers.xavier_initializer())
+            weights['disc_b1'] = tf.get_variable('disc_b1', shape=[50 ],       initializer=tf.zeros_initializer())
+            weights['disc_w2'] = tf.get_variable('disc_w2', shape=[50  , 1  ], initializer=layers.xavier_initializer())
             # final layer has no bias
-
-        return all_weights
+        return weights
 
     # Building the encoder
     def encoder(self, x, weights):
@@ -219,7 +246,7 @@ class ConvAE(object):
         return cost, Coef
 
     def partial_fit_disc(self, X, y_x, lr):
-        assert y_x.min() == 0, 'y_x is 0-based'
+        assert y_x.min() == 0, 'y_x is 0-based, but received min={}'.format(y_x.min())
         self.sess.run([self.optimizer_disc, self.clip_weight], feed_dict={self.x:X, self.y_x:y_x, self.learning_rate:lr})
 
     def partial_fit_eqn3plus(self, X, y_x, lr):
@@ -231,8 +258,19 @@ class ConvAE(object):
         return cost, Coef
 
     def partial_fit_pretrain(self, X, lr):
-        cost = self.sess.run([self.loss_recon_pre], feed_dict={self.x:X})
+        cost, summary, _ = self.sess.run([self.loss_recon_pre, self.summaryop_pretrain, self.optimizer_pre], 
+                feed_dict={self.x:X, self.learning_rate:lr})
+        self.summary_writer.add_summary(summary, self.iter)
+        self.iter += 1
         return cost
+
+    def get_ae_weight_norm(self):
+        norm, = self.sess.run([self.ae_weight_norm])
+        return norm
+
+    def get_loss_recon_pre(self, X):
+        loss_recon_pre, = self.sess.run([self.loss_recon_pre], feed_dict={self.x:X})
+        return loss_recon_pre
 
     def log_accuracy(self, accuracy):
         summary = tf.Summary(value=[tf.Summary.Value(tag='accuracy', simple_value=accuracy)])
@@ -383,75 +421,79 @@ def build_laplacian(C):
     return L
 
 
-def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None):
+def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k=10, post_alpha=3.5):
     alpha = max(0.4 - (n_class-1)/10 * 0.1, 0.1)
     print alpha
 
     acc_= []
-    # one loop per subject subset
-    # if n_class==38, only one subset
-    # if n_class==10, 29 subsets
-    for i in range(0,39-n_class):
-        CAE.initlization()
-        CAE.restore() # restore from pre-trained model
 
-        subset_imgs   = np.array(Img[64*i:64*(i+n_class),:])
-        subset_imgs   = subset_imgs.astype(float)
-        subset_labels = np.array(Label[64*i:64*(i+n_class)])
-        subset_labels = subset_labels - subset_labels.min() #+1
-        subset_labels = np.squeeze(subset_labels)
+    if num_epochs is None:
+        num_epochs =  50 + n_class*25# 100+n_class*20
+    update_interval = 100 # every so many epochs, we recompute the clustering
+    lr = 1.0e-3
 
-        num_epochs =  num_epochs or 50 + n_class*25# 100+n_class*20
-        update_interval = 100 # every so many epochs, we recompute the clustering
-        lr = 1.0e-3
-        # fine-tune network
-        print 'Optimize for {} steps'.format(num_epochs)
-        for epoch in xrange(1, num_epochs+1):
-            if epoch % 10 == 0:
-                print 'epoch {}'.format(epoch)
-            """
-            First 1000 epochs, just train on eqn3
-            Subsequent epochs, train on eqn3plus
-            """
-            if epoch <= args.enable_at: # 1000
-                cost, Coef = CAE.partial_fit_eqn3(subset_imgs, lr)
-            else:
-                CAE.partial_fit_disc(subset_imgs, y_x, lr)  # discriminator step discriminator
-                cost, Coef = CAE.partial_fit_eqn3plus(subset_imgs, y_x, lr)
-            # every 100 epochs, 
-            if epoch % update_interval == 0:
-                print "epoch: %.1d" % epoch, "cost: %.8f" % (cost/float(batch_size))
-                Coef = thrC(Coef,alpha)
-                t_begin = time.time()
-                y_x, _ = post_proC(Coef, n_class, 10, 3.5)
-                missrate_x = err_rate(subset_labels, y_x)
-                t_end = time.time()
-                acc_x = 1 - missrate_x
-                print "experiment: %d" % i, "our accuracy: %.4f" % acc_x
-                print 'post processing time: {}'.format(t_end - t_begin)
-                CAE.log_accuracy(acc_x)
-                clustered = True
-        acc_.append(acc_x)
+    # init
+    CAE.initlization()
 
-    acc_ = np.array(acc_)
-    m = np.mean(acc_)
-    me = np.median(acc_)
-    print("%d subjects:" % n_class)
-    print("Mean: %.4f%%" % ((1-m)*100))
-    print("Median: %.4f%%" % ((1-me)*100))
-    print(acc_)
+    # if we skip pretraining, we restore already-trained model
+    if pretrain==0:
+        CAE.restore()
+    # otherwise we pretrain the model first
+    else:
+        print 'Pretrain for {} steps'.format(pretrain)
+        """
+        After pretrain: 
+            AE l2 norm   : 29
+            Ae recon loss: 13372
+        """
+        for epoch in xrange(1, pretrain+1):
+            minibatch_size = 128
+            indices = np.random.permutation(Img.shape[0])[:minibatch_size]
+            minibatch = Img[indices] # pretrain with random mini-batch
+            cost = CAE.partial_fit_pretrain(minibatch, lr)
+            if epoch % 100 == 0:
+                norm = CAE.get_ae_weight_norm()
+                print 'pretraining epoch {}, cost: {}, norm: {}'.format(epoch, cost/float(minibatch_size), norm)
+    # fine-tune network
+    print 'Finetune for {} steps'.format(num_epochs)
+    acc_x = 0.0
+    for epoch in xrange(1, num_epochs+1):
+        if epoch % 10 == 0:
+            print 'epoch {}'.format(epoch)
+        """
+        First 1000 epochs, just train on eqn3
+        Subsequent epochs, train on eqn3plus
+        """
+        if epoch <= args.enable_at: # 1000
+            cost, Coef = CAE.partial_fit_eqn3(Img, lr)
+        else:
+            CAE.partial_fit_disc(Img, y_x, lr)  # discriminator step discriminator
+            cost, Coef = CAE.partial_fit_eqn3plus(Img, y_x, lr)
+        # every 100 epochs, 
+        if epoch % update_interval == 0:
+            print "epoch: %.1d" % epoch, "cost: %.8f" % (cost/float(batch_size))
+            Coef = thrC(Coef,alpha)
+            t_begin = time.time()
+            y_x, _ = post_proC(Coef, n_class, k, post_alpha)
+            missrate_x = err_rate(Label, y_x)
+            t_end = time.time()
+            acc_x = 1 - missrate_x
+            print "accuracy: {}".format(acc_x)
+            print 'post processing time: {}'.format(t_end - t_begin)
+            CAE.log_accuracy(acc_x)
+            clustered = True
 
-    return (1-m), (1-me)
+    mean   = acc_x
+    median = acc_x
+    print("{} subjects, accuracy: {}".format(n_class, acc_x))
+
+    return (1-mean), (1-median)
 
 
-if __name__ == '__main__':
-    args = parser.parse_args()
-    assert args.name is not None and args.name != '', 'name of experiment must be specified'
-
-    folder = os.path.dirname(os.path.abspath(__file__))
+def prepare_data_YaleB(folder):
     # load face images and labels
-    data = sio.loadmat(os.path.join(folder, 'YaleBCrop025.mat'))
-    img = data['Y']
+    mat = sio.loadmat(os.path.join(folder, 'YaleBCrop025.mat'))
+    img = mat['Y']
 
     # Reorganize data a bit, put images into Img, and labels into Label
     I = []
@@ -466,37 +508,73 @@ if __name__ == '__main__':
     Img = np.transpose(I,[0,2,1])
     Img = np.expand_dims(Img[:],3)
 
-    # configuration for conv-AE
+    # constants
     n_input = [48,42]
-    kernel_size = [5,3,3]
     n_hidden = [10,20,30]
+    kernel_size = [5,3,3]
+    n_sample_perclass = 64
+    # tunable numbers
+    k=10
+    post_alpha=3.5
 
-    all_subjects = [38] # [10, 15, 20, 25, 30, 35, 38]
+    all_subjects = [38] # number of subjects to use in experiment
+    model_path   = os.path.join(folder, 'model-102030-48x42-yaleb.ckpt')
+    return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, k, post_alpha, all_subjects, model_path
 
+
+def prepare_data_orl(folder):
+    mat = sio.loadmat(os.path.join(folder, 'ORLfea.mat'))
+    Label = mat['label'].reshape(400).astype(np.int32)
+    Img = mat['fea'].reshape(400, 32, 32, 1) * 100
+
+    # constants
+    n_input  = [32, 32]
+    n_hidden = [5, 3, 3]
+    kernel_size = [5, 3, 3]
+    n_sample_perclass = 10
+    # tunable numbers
+    k=3             # svds parameter
+    post_alpha=3.5  # Laplacian parameter
+
+    all_subjects=[40]
+    model_path  = os.path.join(folder, 'model-533-32x32-orl-ckpt')
+    return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, k, post_alpha, all_subjects, model_path
+
+
+if __name__ == '__main__':
+    args = parser.parse_args()
+    assert args.name is not None and args.name != '', 'name of experiment must be specified'
+
+    # prepare data
+    folder = os.path.dirname(os.path.abspath(__file__))
+    preparation_funcs = {'yaleb':prepare_data_YaleB, 'orl':prepare_data_orl}
+    assert args.dataset in preparation_funcs
+    Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, k, post_alpha, all_subjects, model_path = preparation_funcs[args.dataset](folder)
+    logs_path    = os.path.join(folder, 'logs', args.name)
+    restore_path = model_path
+
+    # arrays for logging results
     avg = []
     med = []
 
     # for each experiment setting, perform one loop
     for n_class in all_subjects:
-        batch_size = n_class * 64
+        batch_size = n_class * n_sample_perclass
 
-        lambda1 = 1.0                                   # L2 sparsity on C
+        lambda1 = args.lambda1                          # L2 sparsity on C
         lambda2 = 1.0 * 10 ** (n_class / 10.0 - 3.0)    # self-expressivity
         lambda3 = args.lambda3                          # discriminator gradient
-
-        model_path   = os.path.join(folder, 'model-102030-48x42-yaleb.ckpt')
-        logs_path    = os.path.join(folder, 'logs', args.name)
-        restore_path = model_path
 
         # clear graph and build a new conv-AE
         tf.reset_default_graph()
         CAE = ConvAE(
-                n_input, n_hidden, kernel_size, n_class,
+                n_input, n_hidden, kernel_size, n_class, n_sample_perclass,
                 lambda1, lambda2, lambda3, batch_size,
+                reg=tf.contrib.layers.l2_regularizer(tf.ones(1)*0.01),
                 model_path=model_path, restore_path=restore_path, logs_path=logs_path)
 
         # perform optimization
-        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=args.epochs)
+        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=args.epochs, pretrain=args.pretrain, k=k, post_alpha=post_alpha)
         # add result to list
         avg.append(avg_i)
         med.append(med_i)
