@@ -27,3 +27,9 @@ finetuning achieves very consistent result. But if we repeat pre-training everyt
 has significant variance.
 
 
+# TODO
+
+[ ] Add COIL10 and COIL100
+[ ] Allow tuning of number of conv-layers and disc size
+[ ] Nxr rxN
+

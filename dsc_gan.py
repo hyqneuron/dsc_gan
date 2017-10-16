@@ -21,7 +21,8 @@ parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan 
 parser.add_argument('--pretrain',   type=int,   default=0)      # number of iterations of pretraining
 parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train on eqn3 and eqn3plus 
 parser.add_argument('--enable-at',  type=int,   default=1000)   # epoch at which to enable eqn3plus
-parser.add_argument('--dataset',    type=str,   default='yaleb', choices=['yaleb', 'orl'])
+parser.add_argument('--dataset',    type=str,   default='yaleb', choices=['yaleb', 'orl', 'coil20', 'coil100'])
+parser.add_argument('--interval',   type=int,   default=100)
 
 """
 Example launch commands:
@@ -37,7 +38,7 @@ CUDA_VISIBLE_DEVICES=0 python dsc_gan.py orl_run1   --pretrain 10000 --epochs 40
 
 class ConvAE(object):
     def __init__(self,
-            n_input, n_hidden, kernel_size, n_class, n_sample_perclass,
+            n_input, n_hidden, kernel_size, n_class, n_sample_perclass, disc_size,
             lambda1, lambda2, lambda3, batch_size,
             reg=None, disc_bound=0.02,
             model_path = None, restore_path = None,
@@ -47,6 +48,7 @@ class ConvAE(object):
         self.n_hidden = n_hidden
         self.kernel_size = kernel_size
         self.n_sample_perclass = n_sample_perclass
+        self.disc_size = disc_size
         self.batch_size = batch_size
         self.reg = reg
         self.model_path = model_path
@@ -57,56 +59,54 @@ class ConvAE(object):
         self.x = tf.placeholder(tf.float32, [None, n_input[0], n_input[1], 1])
         self.learning_rate = tf.placeholder(tf.float32, [])
 
-        # weights
-        weight_dict = self.make_weights()
-        weight_list = weight_dict.values()
-        ae_weights    = [v for v in weight_list if v.name!='Coef']
-        self.ae_weight_norm = tf.sqrt(sum([tf.norm(v, 2)**2 for v in ae_weights]))
-
         # run input through encoder
-        latent, shape = self.encoder(self.x, weight_dict)
+        latent, shape = self.encoder(self.x)
         self.latent_shape = latent.shape
         self.latent_size  = reduce(lambda x,y:int(x)*int(y), self.latent_shape[1:], 1)
-        print self.latent_size
 
         # self-expressive layer
         z = tf.reshape(latent, [batch_size, -1])
-        Coef = weight_dict['Coef']
-        #Coef = Coef * (1-tf.eye(batch_size)) # slightly reduces accuracy
+        Coef = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size],tf.float32), name = 'Coef')
         z_c = tf.matmul(Coef,z)
         self.Coef = Coef
         latent_c = tf.reshape(z_c, tf.shape(latent)) # petential problem here
         self.z = z
 
         # run self-expressive's output through decoder
-        self.x_r = self.decoder(latent_c, weight_dict, shape)
+        self.x_r = self.decoder(latent_c, shape)
+        ae_weights    = [v for v in tf.trainable_variables() if (v.name.startswith('enc') or v.name.startswith('dec'))]
+        self.ae_weight_norm = tf.sqrt(sum([tf.norm(v, 2)**2 for v in ae_weights]))
+        eqn3_weights = [Coef] + ae_weights
 
         # Eqn 3 loss
         self.loss_recon = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r, self.x), 2.0))
         self.loss_sparsity = tf.reduce_sum(tf.pow(self.Coef,2.0))
         self.loss_selfexpress = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(z_c, z), 2.0))
         self.loss_eqn3 = self.loss_recon + lambda1 * self.loss_sparsity + lambda2 * self.loss_selfexpress
-        self.optimizer_eqn3 = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3, var_list=weight_list)
+        with tf.variable_scope('optimizer_eqn3'):
+            self.optimizer_eqn3 = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3, var_list=eqn3_weights)
 
         # pretraining loss
-        self.x_r_pre = self.decoder(latent, weight_dict, shape)
+        self.x_r_pre = self.decoder(latent, shape, reuse=True)
         self.loss_recon_pre = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r_pre, self.x), 2.0))
         self.loss_reg_pre   = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES) # weight decay
         self.loss_pretrain  = self.loss_recon_pre + self.loss_reg_pre
-        self.optimizer_pre = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_pretrain, var_list=ae_weights)
+        with tf.variable_scope('optimizer_pre'):
+            self.optimizer_pre = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_pretrain, var_list=ae_weights)
 
         # discriminator loss
-        disc_weights = self.make_disc_weights()
         self.y_x    = tf.placeholder(tf.int32, [None])
         self.z_real = z
         self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, self.n_sample_perclass)
-        self.score_disc = self.score_discriminator(self.z_real, self.z_fake, disc_weights)
-        self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights.values())
-        self.clip_weight = [w.assign(tf.clip_by_value(w, -disc_bound, disc_bound)) for w in disc_weights.values()]
+        self.score_disc = self.score_discriminator(self.z_real, self.z_fake)
+        disc_weights = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
+        self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights)
+        self.clip_weight = [v.assign(tf.clip_by_value(v, -disc_bound, disc_bound)) for v in disc_weights]
 
         # Eqn 3 + generator loss
         self.loss_eqn3plus = self.loss_eqn3 + lambda3 * self.score_disc
-        self.optimizer_eqn3plus = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3plus, var_list=weight_list)
+        with tf.variable_scope('optimizer_eqn3plus'):
+            self.optimizer_eqn3plus = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3plus, var_list=eqn3_weights)
 
         # finalize stuffs
         s0 = tf.summary.scalar("loss_recon_pre",   self.loss_recon_pre / batch_size) # 13372
@@ -120,97 +120,65 @@ class ConvAE(object):
         self.summaryop_pretrain = tf.summary.merge([s0, s5])
         self.init = tf.global_variables_initializer()
         config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True  # stop TF from eating up all GPU RAM 
-        config.gpu_options.per_process_gpu_memory_fraction = 0.4
+        #config.gpu_options.allow_growth = True  # stop TF from eating up all GPU RAM 
+        #config.gpu_options.per_process_gpu_memory_fraction = 0.4
         self.sess = tf.InteractiveSession(config=config)
         self.sess.run(self.init)
-        self.saver = tf.train.Saver([v for v in tf.trainable_variables() if not (v.name.startswith("Coef") or v.name.startswith('disc'))])
+        self.saver = tf.train.Saver([v for v in ae_weights if v.name.startswith('enc_w') or v.name.startswith('dec_w')])
         self.summary_writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph(), flush_secs=20)
 
-    def make_weights(self):
-        weights = dict()
-        with tf.device('/gpu:0'):
-            # AE weights + C weights
-            weights['enc_w0'] = tf.get_variable("enc_w0", shape=[self.kernel_size[0], self.kernel_size[0], 1, self.n_hidden[0]],
-                initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            weights['enc_b0'] = tf.Variable(tf.zeros([self.n_hidden[0]], dtype = tf.float32))
-
-            weights['enc_w1'] = tf.get_variable("enc_w1", shape=[self.kernel_size[1], self.kernel_size[1], self.n_hidden[0],self.n_hidden[1]],
-                initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            weights['enc_b1'] = tf.Variable(tf.zeros([self.n_hidden[1]], dtype = tf.float32))
-
-            weights['enc_w2'] = tf.get_variable("enc_w2", shape=[self.kernel_size[2], self.kernel_size[2], self.n_hidden[1],self.n_hidden[2]],
-                initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            weights['enc_b2'] = tf.Variable(tf.zeros([self.n_hidden[2]], dtype = tf.float32))
-
-            weights['Coef']   = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size],tf.float32), name = 'Coef')
-
-            weights['dec_w0'] = tf.get_variable("dec_w0", shape=[self.kernel_size[2], self.kernel_size[2], self.n_hidden[1],self.n_hidden[2]],
-                initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            weights['dec_b0'] = tf.Variable(tf.zeros([self.n_hidden[1]], dtype = tf.float32))
-
-            weights['dec_w1'] = tf.get_variable("dec_w1", shape=[self.kernel_size[1], self.kernel_size[1], self.n_hidden[0],self.n_hidden[1]],
-                initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            weights['dec_b1'] = tf.Variable(tf.zeros([self.n_hidden[0]], dtype = tf.float32))
-
-            weights['dec_w2'] = tf.get_variable("dec_w2", shape=[self.kernel_size[0], self.kernel_size[0],1, self.n_hidden[0]],
-                initializer=layers.xavier_initializer_conv2d(),regularizer = self.reg)
-            weights['dec_b2'] = tf.Variable(tf.zeros([1], dtype = tf.float32))
-        return weights
-
-    def make_disc_weights(self):
-        weights = dict()
-        with tf.device('/gpu:0'):
-            # discriminator weights
-            weights['disc_w0'] = tf.get_variable('disc_w0', shape=[self.latent_size, 200], initializer=layers.xavier_initializer())
-            weights['disc_b0'] = tf.get_variable('disc_b0', shape=[200],       initializer=tf.zeros_initializer())
-            weights['disc_w1'] = tf.get_variable('disc_w1', shape=[200 , 50 ], initializer=layers.xavier_initializer())
-            weights['disc_b1'] = tf.get_variable('disc_b1', shape=[50 ],       initializer=tf.zeros_initializer())
-            weights['disc_w2'] = tf.get_variable('disc_w2', shape=[50  , 1  ], initializer=layers.xavier_initializer())
-            # final layer has no bias
-        return weights
-
     # Building the encoder
-    def encoder(self, x, weights):
+    def encoder(self, x):
         shapes = []
-        # Encoder Hidden layer with sigmoid activation #1
-        shapes.append(x.get_shape().as_list())
-        layer1 = tf.nn.bias_add(tf.nn.conv2d(x, weights['enc_w0'], strides=[1,2,2,1],padding='SAME'),weights['enc_b0'])
-        layer1 = tf.nn.relu(layer1)
-        shapes.append(layer1.get_shape().as_list())
-        layer2 = tf.nn.bias_add(tf.nn.conv2d(layer1, weights['enc_w1'], strides=[1,2,2,1],padding='SAME'),weights['enc_b1'])
-        layer2 = tf.nn.relu(layer2)
-        shapes.append(layer2.get_shape().as_list())
-        layer3 = tf.nn.bias_add(tf.nn.conv2d(layer2, weights['enc_w2'], strides=[1,2,2,1],padding='SAME'),weights['enc_b2'])
-        layer3 = tf.nn.relu(layer3)
-        return  layer3, shapes
+        n_hidden = [1] + self.n_hidden
+        input = x
+        for i, k_size in enumerate(self.kernel_size):
+            w = tf.get_variable('enc_w{}'.format(i), shape=[k_size, k_size, n_hidden[i], n_hidden[i+1]], 
+                    initializer=layers.xavier_initializer_conv2d(), regularizer=self.reg)
+            b = tf.get_variable('enc_b{}'.format(i), shape=[n_hidden[i+1]], initializer=tf.zeros_initializer())
+            shapes.append(input.get_shape().as_list())
+            enc_i = tf.nn.conv2d(input, w, strides=[1,2,2,1], padding='SAME')
+            enc_i = tf.nn.bias_add(enc_i, b)
+            enc_i = tf.nn.relu(enc_i)
+            input = enc_i
+        return  input, shapes
 
     # Building the decoder
-    def decoder(self, z, weights, shapes):
+    def decoder(self, z, shapes, reuse=False):
         # Encoder Hidden layer with sigmoid activation #1
-        shape_de1 = shapes[2]
-        layer1 = tf.add(tf.nn.conv2d_transpose(z, weights['dec_w0'], tf.stack([tf.shape(self.x)[0],shape_de1[1],shape_de1[2],shape_de1[3]]),\
-         strides=[1,2,2,1],padding='SAME'),weights['dec_b0'])
-        layer1 = tf.nn.relu(layer1)
-        shape_de2 = shapes[1]
-        layer2 = tf.add(tf.nn.conv2d_transpose(layer1, weights['dec_w1'], tf.stack([tf.shape(self.x)[0],shape_de2[1],shape_de2[2],shape_de2[3]]),\
-         strides=[1,2,2,1],padding='SAME'),weights['dec_b1'])
-        layer2 = tf.nn.relu(layer2)
-        shape_de3= shapes[0]
-        layer3 = tf.add(tf.nn.conv2d_transpose(layer2, weights['dec_w2'], tf.stack([tf.shape(self.x)[0],shape_de3[1],shape_de3[2],shape_de3[3]]),\
-         strides=[1,2,2,1],padding='SAME'),weights['dec_b2'])
-        layer3 = tf.nn.relu(layer3)
-        return layer3
+        input = z
+        n_hidden = list(reversed([1] + self.n_hidden))
+        shapes   = list(reversed(shapes))
+        for i, k_size in enumerate(reversed(kernel_size)):
+            with tf.variable_scope('', reuse=reuse):
+                w = tf.get_variable('dec_w{}'.format(i), shape=[k_size, k_size, n_hidden[i+1], n_hidden[i]],
+                        initializer=layers.xavier_initializer_conv2d(), regularizer=self.reg)
+                b = tf.get_variable('dec_b{}'.format(i), shape=[n_hidden[i+1]], initializer=tf.zeros_initializer())
+                dec_i = tf.nn.conv2d_transpose(input, w, tf.stack([tf.shape(self.x)[0], shapes[i][1], shapes[i][2], shapes[i][3]]), 
+                    strides=[1,2,2,1], padding='SAME')
+                dec_i = tf.add(dec_i, b)
+                if i != len(self.n_hidden) - 1:
+                    dec_i = tf.nn.relu(dec_i)
+                input = dec_i
+        return input
 
-    def discriminator(self, Z_input, weights):
-        D0 = tf.nn.relu(tf.add(tf.matmul(Z_input, weights['disc_w0']), weights['disc_b0']))
-        D1 = tf.nn.relu(tf.add(tf.matmul(D0     , weights['disc_w1']), weights['disc_b1']))
-        D2 =            tf.add(tf.matmul(D1     , weights['disc_w2']), 0)
-        return D2
+    def discriminator(self, Z_input, reuse=False):
+        disc_size = [self.latent_size] + self.disc_size
+        num_d_layers = len(self.disc_size)
+        input = Z_input
+        for i in xrange(num_d_layers):
+            with tf.variable_scope('', reuse=reuse):
+                w = tf.get_variable('disc_w{}'.format(i), shape=[disc_size[i], disc_size[i+1]], initializer=layers.xavier_initializer())
+                disc_i = tf.matmul(input, w)
+                if i != num_d_layers-1:
+                    b = tf.get_variable('disc_b{}'.format(i), shape=[disc_size[i+1]], initializer=tf.zeros_initializer())
+                    disc_i = tf.nn.relu(tf.add(disc_i, b))
+                input = disc_i
+        return input
 
-    def score_discriminator(self, z_real, z_fake, weights):
-        score_real = self.discriminator(z_real, weights)
-        score_fake = self.discriminator(z_fake, weights)
+    def score_discriminator(self, z_real, z_fake):
+        score_real = self.discriminator(z_real)
+        score_fake = self.discriminator(z_fake, reuse=True)
         score = tf.reduce_mean(score_real - score_fake) # maximize score_real, minimize score_fake
         # a good discriminator would have a very positive score
         return score
@@ -421,7 +389,7 @@ def build_laplacian(C):
     return L
 
 
-def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k=10, post_alpha=3.5):
+def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k=10, post_alpha=3.5, update_interval=100):
     alpha = max(0.4 - (n_class-1)/10 * 0.1, 0.1)
     print alpha
 
@@ -429,7 +397,6 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k
 
     if num_epochs is None:
         num_epochs =  50 + n_class*25# 100+n_class*20
-    update_interval = 100 # every so many epochs, we recompute the clustering
     lr = 1.0e-3
 
     # init
@@ -475,6 +442,7 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k
             Coef = thrC(Coef,alpha)
             t_begin = time.time()
             y_x, _ = post_proC(Coef, n_class, k, post_alpha)
+            print y_x.shape
             missrate_x = err_rate(Label, y_x)
             t_end = time.time()
             acc_x = 1 - missrate_x
@@ -513,13 +481,14 @@ def prepare_data_YaleB(folder):
     n_hidden = [10,20,30]
     kernel_size = [5,3,3]
     n_sample_perclass = 64
+    disc_size = [200,50,1]
     # tunable numbers
     k=10
     post_alpha=3.5
 
     all_subjects = [38] # number of subjects to use in experiment
     model_path   = os.path.join(folder, 'model-102030-48x42-yaleb.ckpt')
-    return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, k, post_alpha, all_subjects, model_path
+    return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, disc_size, k, post_alpha, all_subjects, model_path
 
 
 def prepare_data_orl(folder):
@@ -532,13 +501,54 @@ def prepare_data_orl(folder):
     n_hidden = [5, 3, 3]
     kernel_size = [5, 3, 3]
     n_sample_perclass = 10
+    disc_size = [200,50,1]
     # tunable numbers
     k=3             # svds parameter
     post_alpha=3.5  # Laplacian parameter
 
     all_subjects=[40]
     model_path  = os.path.join(folder, 'model-533-32x32-orl-ckpt')
-    return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, k, post_alpha, all_subjects, model_path
+    return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, disc_size, k, post_alpha, all_subjects, model_path
+
+
+def prepare_data_coil20(folder):
+    mat = sio.loadmat(os.path.join(folder, 'COIL20fea.mat'))
+    Label = mat['label'].reshape(-1).astype(np.int32) # 1440
+    Img = mat['fea'].reshape(-1, 32, 32, 1) * 100
+
+    # constants
+    n_input  = [32, 32]
+    n_hidden = [15]
+    kernel_size = [3]
+    n_sample_perclass = Img.shape[0] / 20
+    disc_size = [50,1]
+    # tunable numbers
+    k=10            # svds parameter
+    post_alpha=3.5  # Laplacian parameter
+
+    all_subjects=[20]
+    model_path  = os.path.join(folder, 'model-3-32x32-coil20-ckpt')
+    return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, disc_size, k, post_alpha, all_subjects, model_path
+
+
+def prepare_data_coil100(folder):
+    mat = sio.loadmat(os.path.join(folder, 'COIL100fea.mat'))
+    Label = mat['label'].reshape(-1).astype(np.int32) # 1440
+    Img = mat['fea'].reshape(-1, 32, 32, 1) * 100
+
+    # constants
+    n_input  = [32, 32]
+    n_hidden = [50]
+    kernel_size = [5]
+    n_sample_perclass = Img.shape[0] / 100
+    disc_size = [50,1]
+    # tunable numbers
+    k=10            # svds parameter
+    post_alpha=3.5  # Laplacian parameter
+
+    all_subjects=[100]
+    model_path  = os.path.join(folder, 'model-5-32x32-coil100-ckpt')
+    return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, disc_size, k, post_alpha, all_subjects, model_path
 
 
 if __name__ == '__main__':
@@ -547,9 +557,13 @@ if __name__ == '__main__':
 
     # prepare data
     folder = os.path.dirname(os.path.abspath(__file__))
-    preparation_funcs = {'yaleb':prepare_data_YaleB, 'orl':prepare_data_orl}
+    preparation_funcs = {
+            'yaleb':prepare_data_YaleB, 
+            'orl':prepare_data_orl,
+            'coil20':prepare_data_coil20,
+            'coil100':prepare_data_coil100}
     assert args.dataset in preparation_funcs
-    Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, k, post_alpha, all_subjects, model_path = preparation_funcs[args.dataset](folder)
+    Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, disc_size, k, post_alpha, all_subjects, model_path = preparation_funcs[args.dataset](folder)
     logs_path    = os.path.join(folder, 'logs', args.name)
     restore_path = model_path
 
@@ -568,13 +582,14 @@ if __name__ == '__main__':
         # clear graph and build a new conv-AE
         tf.reset_default_graph()
         CAE = ConvAE(
-                n_input, n_hidden, kernel_size, n_class, n_sample_perclass,
+                n_input, n_hidden, kernel_size, n_class, n_sample_perclass, disc_size,
                 lambda1, lambda2, lambda3, batch_size,
                 reg=tf.contrib.layers.l2_regularizer(tf.ones(1)*0.01),
                 model_path=model_path, restore_path=restore_path, logs_path=logs_path)
 
         # perform optimization
-        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=args.epochs, pretrain=args.pretrain, k=k, post_alpha=post_alpha)
+        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=args.epochs, pretrain=args.pretrain,
+                k=k, post_alpha=post_alpha, update_interval=args.interval)
         # add result to list
         avg.append(avg_i)
         med.append(med_i)
