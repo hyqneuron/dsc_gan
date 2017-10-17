@@ -22,7 +22,8 @@ parser.add_argument('--pretrain',   type=int,   default=0)      # number of iter
 parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train on eqn3 and eqn3plus 
 parser.add_argument('--enable-at',  type=int,   default=1000)   # epoch at which to enable eqn3plus
 parser.add_argument('--dataset',    type=str,   default='yaleb', choices=['yaleb', 'orl', 'coil20', 'coil100'])
-parser.add_argument('--interval',   type=int,   default=100)
+parser.add_argument('--interval',   type=int,   default=50)
+parser.add_argument('--interval2',  type=int,   default=1)
 
 """
 Example launch commands:
@@ -389,7 +390,8 @@ def build_laplacian(C):
     return L
 
 
-def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k=10, post_alpha=3.5, update_interval=100):
+def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k=10, post_alpha=3.5,
+        normal_interval=100, gan_interval=1):
     alpha = max(0.4 - (n_class-1)/10 * 0.1, 0.1)
     print alpha
 
@@ -433,11 +435,13 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k
         """
         if epoch <= args.enable_at: # 1000
             cost, Coef = CAE.partial_fit_eqn3(Img, lr)
+            interval = normal_interval
         else:
             CAE.partial_fit_disc(Img, y_x, lr)  # discriminator step discriminator
             cost, Coef = CAE.partial_fit_eqn3plus(Img, y_x, lr)
-        # every 100 epochs, 
-        if epoch % update_interval == 0:
+            interval = gan_interval
+        # every interval epochs, perform clustering and evaluate accuracy
+        if epoch % interval == 0:
             print "epoch: %.1d" % epoch, "cost: %.8f" % (cost/float(batch_size))
             Coef = thrC(Coef,alpha)
             t_begin = time.time()
@@ -589,7 +593,7 @@ if __name__ == '__main__':
 
         # perform optimization
         avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=args.epochs, pretrain=args.pretrain,
-                k=k, post_alpha=post_alpha, update_interval=args.interval)
+                k=k, post_alpha=post_alpha, normal_interval=args.interval, gan_interval=args.interval2)
         # add result to list
         avg.append(avg_i)
         med.append(med_i)
