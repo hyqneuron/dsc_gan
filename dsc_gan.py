@@ -496,7 +496,7 @@ def prepare_data_YaleB(folder):
 
 
 def prepare_data_orl(folder):
-    mat = sio.loadmat(os.path.join(folder, 'ORLfea.mat'))
+    mat = sio.loadmat(os.path.join(folder, 'ORL2fea.mat'))
     Label = mat['label'].reshape(400).astype(np.int32)
     Img = mat['fea'].reshape(400, 32, 32, 1) * 100
 
@@ -516,7 +516,7 @@ def prepare_data_orl(folder):
 
 
 def prepare_data_coil20(folder):
-    mat = sio.loadmat(os.path.join(folder, 'COIL20fea.mat'))
+    mat = sio.loadmat(os.path.join(folder, 'COLT20fea2fea.mat'))
     Label = mat['label'].reshape(-1).astype(np.int32) # 1440
     Img = mat['fea'].reshape(-1, 32, 32, 1) * 100
 
@@ -536,7 +536,7 @@ def prepare_data_coil20(folder):
 
 
 def prepare_data_coil100(folder):
-    mat = sio.loadmat(os.path.join(folder, 'COIL100fea.mat'))
+    mat = sio.loadmat(os.path.join(folder, 'COLT100fea2fea.mat'))
     Label = mat['label'].reshape(-1).astype(np.int32) # 1440
     Img = mat['fea'].reshape(-1, 32, 32, 1) * 100
 
