@@ -18,6 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('name')                                     # name of experiment, used for creating log directory
 parser.add_argument('--lambda1',    type=float, default=1.0)
 parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan loss
+parser.add_argument('--lambda4',    type=float, default=0.01)   # lambda on AE L2 regularization
 parser.add_argument('--pretrain',   type=int,   default=0)      # number of iterations of pretraining
 parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train on eqn3 and eqn3plus 
 parser.add_argument('--enable-at',  type=int,   default=1000)   # epoch at which to enable eqn3plus
@@ -83,19 +84,21 @@ class ConvAE(object):
         self.ae_weight_norm = tf.sqrt(sum([tf.norm(v, 2)**2 for v in ae_weights]))
         eqn3_weights = [Coef] + ae_weights
 
+        # AE regularization loss
+        self.loss_aereg   = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES) # weight decay
+
         # Eqn 3 loss
         self.loss_recon = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r, self.x), 2.0))
         self.loss_sparsity = tf.reduce_sum(tf.pow(self.Coef,2.0))
         self.loss_selfexpress = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(z_c, z), 2.0))
-        self.loss_eqn3 = self.loss_recon + lambda1 * self.loss_sparsity + lambda2 * self.loss_selfexpress
+        self.loss_eqn3 = self.loss_recon + lambda1 * self.loss_sparsity + lambda2 * self.loss_selfexpress + self.loss_aereg
         with tf.variable_scope('optimizer_eqn3'):
             self.optimizer_eqn3 = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3, var_list=eqn3_weights)
 
         # pretraining loss
         self.x_r_pre = self.decoder(latent, shape, reuse=True)
         self.loss_recon_pre = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r_pre, self.x), 2.0))
-        self.loss_reg_pre   = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES) # weight decay
-        self.loss_pretrain  = self.loss_recon_pre + self.loss_reg_pre
+        self.loss_pretrain  = self.loss_recon_pre + self.loss_aereg
         with tf.variable_scope('optimizer_pre'):
             self.optimizer_pre = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_pretrain, var_list=ae_weights)
 
@@ -109,7 +112,7 @@ class ConvAE(object):
         self.clip_weight = [v.assign(tf.clip_by_value(v, -disc_bound, disc_bound)) for v in disc_weights]
 
         # Eqn 3 + generator loss
-        self.loss_eqn3plus = self.loss_eqn3 + lambda3 * self.score_disc
+        self.loss_eqn3plus = self.loss_eqn3 + lambda3 * self.score_disc + self.loss_aereg
         with tf.variable_scope('optimizer_eqn3plus'):
             self.optimizer_eqn3plus = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_eqn3plus, var_list=eqn3_weights)
 
@@ -596,7 +599,7 @@ if __name__ == '__main__':
         CAE = ConvAE(
                 n_input, n_hidden, kernel_size, n_class, n_sample_perclass, disc_size,
                 lambda1, lambda2, lambda3, batch_size,
-                reg=tf.contrib.layers.l2_regularizer(tf.ones(1)*0.01), disc_bound=args.bound,
+                reg=tf.contrib.layers.l2_regularizer(tf.ones(1)*args.lambda4), disc_bound=args.bound,
                 model_path=model_path, restore_path=restore_path, logs_path=logs_path)
 
         # perform optimization
