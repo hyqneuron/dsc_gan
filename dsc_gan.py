@@ -27,6 +27,7 @@ parser.add_argument('--interval2',  type=int,   default=1)
 parser.add_argument('--bound',      type=float, default=0.02)
 parser.add_argument('--D-steps',    type=int,   default=1)
 parser.add_argument('--G-steps',    type=int,   default=1)
+parser.add_argument('--save',       action='store_true')
 
 """
 Example launch commands:
@@ -394,7 +395,7 @@ def build_laplacian(C):
 
 
 def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k=10, post_alpha=3.5,
-        normal_interval=100, gan_interval=1, G_steps=1, D_steps=1):
+        normal_interval=100, gan_interval=1, G_steps=1, D_steps=1, save=False):
     alpha = max(0.4 - (n_class-1)/10 * 0.1, 0.1)
     print alpha
 
@@ -426,6 +427,8 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k
             if epoch % 100 == 0:
                 norm = CAE.get_ae_weight_norm()
                 print 'pretraining epoch {}, cost: {}, norm: {}'.format(epoch, cost/float(minibatch_size), norm)
+        if save:
+            CAE.save_model()
     # fine-tune network
     print 'Finetune for {} steps'.format(num_epochs)
     acc_x = 0.0
@@ -599,7 +602,7 @@ if __name__ == '__main__':
         # perform optimization
         avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=args.epochs, pretrain=args.pretrain,
                 k=k, post_alpha=post_alpha, normal_interval=args.interval, gan_interval=args.interval2,
-                G_steps=args.G_steps, D_steps=args.D_steps)
+                G_steps=args.G_steps, D_steps=args.D_steps, save=args.save)
         # add result to list
         avg.append(avg_i)
         med.append(med_i)
