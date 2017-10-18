@@ -187,7 +187,7 @@ class ConvAE(object):
     def score_discriminator(self, z_real, z_fake):
         score_real = self.discriminator(z_real)
         score_fake = self.discriminator(z_fake, reuse=True)
-        score = tf.reduce_mean(score_real - score_fake) # maximize score_real, minimize score_fake
+        score = tf.reduce_mean(score_real) - tf.reduce_mean(score_fake) # maximize score_real, minimize score_fake
         # a good discriminator would have a very positive score
         return score
 
