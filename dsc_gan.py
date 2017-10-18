@@ -31,6 +31,7 @@ parser.add_argument('--bound',      type=float, default=0.02)
 parser.add_argument('--D-steps',    type=int,   default=1)
 parser.add_argument('--G-steps',    type=int,   default=1)
 parser.add_argument('--save',       action='store_true')
+parser.add_argument('--r',          type=int,   default=0)
 
 """
 Example launch commands:
@@ -47,7 +48,7 @@ CUDA_VISIBLE_DEVICES=0 python dsc_gan.py orl_run1   --pretrain 10000 --epochs 40
 class ConvAE(object):
     def __init__(self,
             n_input, n_hidden, kernel_size, n_class, n_sample_perclass, disc_size,
-            lambda1, lambda2, lambda3, batch_size,
+            lambda1, lambda2, lambda3, batch_size, r=0,
             reg=None, disc_bound=0.02,
             model_path = None, restore_path = None,
             logs_path = 'logs'):
@@ -74,9 +75,16 @@ class ConvAE(object):
 
         # self-expressive layer
         z = tf.reshape(latent, [batch_size, -1])
-        Coef = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size],tf.float32), name = 'Coef')
+        if r==0:
+            Coef = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size],tf.float32), name = 'Coef')
+        else:
+            v = (1e-2) / r
+            L = tf.Variable(v * tf.ones([self.batch_size, r]), name='Coef_L')
+            R = tf.Variable(v * tf.ones([r, self.batch_size]), name='Coef_R')
+            Coef = tf.matmul(L, R, name='Coef_full')
         z_c = tf.matmul(Coef,z, name='matmul_Cz')
         self.Coef = Coef
+        Coef_weights = [v for v in tf.trainable_variables() if v.name.startswith('Coef')]
         latent_c = tf.reshape(z_c, tf.shape(latent)) # petential problem here
         self.z = z
 
@@ -84,7 +92,7 @@ class ConvAE(object):
         self.x_r = self.decoder(latent_c, shape)
         ae_weights    = [v for v in tf.trainable_variables() if (v.name.startswith('enc') or v.name.startswith('dec'))]
         self.ae_weight_norm = tf.sqrt(sum([tf.norm(v, 2)**2 for v in ae_weights]))
-        eqn3_weights = [Coef] + ae_weights
+        eqn3_weights = Coef_weights + ae_weights
 
         # AE regularization loss
         self.loss_aereg   = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES) # weight decay
@@ -604,7 +612,7 @@ if __name__ == '__main__':
         tf.reset_default_graph()
         CAE = ConvAE(
                 n_input, n_hidden, kernel_size, n_class, n_sample_perclass, disc_size,
-                lambda1, lambda2, lambda3, batch_size,
+                lambda1, lambda2, lambda3, batch_size, r=args.r,
                 reg=tf.contrib.layers.l2_regularizer(tf.ones(1)*args.lambda4), disc_bound=args.bound,
                 model_path=model_path, restore_path=restore_path, logs_path=logs_path)
 
