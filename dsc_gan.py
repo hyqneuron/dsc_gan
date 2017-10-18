@@ -17,6 +17,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('name')                                     # name of experiment, used for creating log directory
 parser.add_argument('--lambda1',    type=float, default=1.0)
+parser.add_argument('--lambda2',    type=float, default=0.2)
 parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan loss
 parser.add_argument('--lambda4',    type=float, default=0.1)    # lambda on AE L2 regularization
 parser.add_argument('--pretrain',   type=int,   default=0)      # number of iterations of pretraining
@@ -210,7 +211,7 @@ class ConvAE(object):
                 selector = tf.random_uniform([M, N_g])                  # make random selector matrix
                 selector = selector / tf.reduce_sum(selector, 1, keep_dims=True)# normalize each row to 1
                 return tf.matmul(selector, g, name='matmul_selectfake')
-            selected = tf.cond(tf.greater(N_g, 0),  # perform selection, while bypassing groups with 0 samples
+            selected = tf.cond(tf.greater(N_g, 1),  # perform selection, while bypassing groups with 0 samples
                     make_selected, lambda: tf.zeros(shape=[0, dim1]))
             combined.append(selected)
         z_fake = tf.concat(combined, 0) # a matrix of KxM,
@@ -459,7 +460,9 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k
             print "epoch: %.1d" % epoch, "cost: %.8f" % (cost/float(batch_size))
             Coef = thrC(Coef,alpha)
             t_begin = time.time()
-            y_x, _ = post_proC(Coef, n_class, k, post_alpha)
+            y_x_new, _ = post_proC(Coef, n_class, k, post_alpha)
+            if len(set(list(np.squeeze(y_x_new)))) == n_class:
+                y_x = y_x_new
             print y_x.shape
             missrate_x = err_rate(Label, y_x)
             t_end = time.time()
@@ -594,7 +597,7 @@ if __name__ == '__main__':
         batch_size = n_class * n_sample_perclass
 
         lambda1 = args.lambda1                          # L2 sparsity on C
-        lambda2 = 1.0 * 10 ** (n_class / 10.0 - 3.0)    # self-expressivity
+        lambda2 = args.lambda2 # 0.2 # 1.0 * 10 ** (n_class / 10.0 - 3.0)    # self-expressivity
         lambda3 = args.lambda3                          # discriminator gradient
 
         # clear graph and build a new conv-AE
