@@ -73,7 +73,7 @@ class ConvAE(object):
         # self-expressive layer
         z = tf.reshape(latent, [batch_size, -1])
         Coef = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size],tf.float32), name = 'Coef')
-        z_c = tf.matmul(Coef,z)
+        z_c = tf.matmul(Coef,z, name='matmul_Cz')
         self.Coef = Coef
         latent_c = tf.reshape(z_c, tf.shape(latent)) # petential problem here
         self.z = z
@@ -177,7 +177,7 @@ class ConvAE(object):
         for i in xrange(num_d_layers):
             with tf.variable_scope('', reuse=reuse):
                 w = tf.get_variable('disc_w{}'.format(i), shape=[disc_size[i], disc_size[i+1]], initializer=layers.xavier_initializer())
-                disc_i = tf.matmul(input, w)
+                disc_i = tf.matmul(input, w, name='matmul_disc{}'.format(i))
                 if i != num_d_layers-1:
                     b = tf.get_variable('disc_b{}'.format(i), shape=[disc_size[i+1]], initializer=tf.zeros_initializer())
                     disc_i = tf.nn.relu(tf.add(disc_i, b))
@@ -200,6 +200,7 @@ class ConvAE(object):
         """
         group_index = [tf.where(tf.equal(y_x, k))        for k in xrange(K)] # indices of datapoints in k-th cluster
         groups      = [tf.gather(z_real, group_index[k]) for k in xrange(K)] # datapoints in k-th cluster
+        dim1 = tf.shape(z_real)[1]
         # for each group, take M random combination as fake samples
         combined = []
         for g in groups:
@@ -208,7 +209,9 @@ class ConvAE(object):
             selector = tf.random_uniform([M, N_g])                  # make random selector matrix
             selector = selector / tf.reduce_sum(selector, 1, keep_dims=True)# normalize each row to 1
             #print selector.shape, g.shape, z_real.shape
-            selected = tf.matmul(selector, g)       # make M linear combinations
+            num_selected = tf.shape(g)[0]
+            selected = tf.cond(tf.greater(num_selected, 0),  # perform selection, while bypassing groups with 0 samples
+                    lambda: tf.matmul(selector, g, name='matmul_selectfake'), lambda: tf.zeros(shape=[0, dim1]))
             combined.append(selected)
         z_fake = tf.concat(combined, 0) # a matrix of KxM,
         return z_fake
