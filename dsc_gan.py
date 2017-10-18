@@ -17,9 +17,10 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('name')                                     # name of experiment, used for creating log directory
 parser.add_argument('--lambda1',    type=float, default=1.0)
-parser.add_argument('--lambda2',    type=float, default=0.2)
+parser.add_argument('--lambda2',    type=float, default=0.2)    # sparsity cost on C
 parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan loss
 parser.add_argument('--lambda4',    type=float, default=0.1)    # lambda on AE L2 regularization
+parser.add_argument('--lr',         type=float, default=2e-4)   # learning rate
 parser.add_argument('--pretrain',   type=int,   default=0)      # number of iterations of pretraining
 parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train on eqn3 and eqn3plus 
 parser.add_argument('--enable-at',  type=int,   default=1000)   # epoch at which to enable eqn3plus
@@ -401,7 +402,7 @@ def build_laplacian(C):
     return L
 
 
-def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k=10, post_alpha=3.5,
+def reinit_and_optimize(Img, Label, CAE, n_class, lr=2e-4, num_epochs=None, pretrain=0, k=10, post_alpha=3.5,
         normal_interval=100, gan_interval=1, G_steps=1, D_steps=1, save=False):
     alpha = max(0.4 - (n_class-1)/10 * 0.1, 0.1)
     print alpha
@@ -410,7 +411,6 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k
 
     if num_epochs is None:
         num_epochs =  50 + n_class*25# 100+n_class*20
-    lr = 2.0e-4
 
     # init
     CAE.initlization()
@@ -609,7 +609,7 @@ if __name__ == '__main__':
                 model_path=model_path, restore_path=restore_path, logs_path=logs_path)
 
         # perform optimization
-        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=args.epochs, pretrain=args.pretrain,
+        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, lr=args.lr, num_epochs=args.epochs, pretrain=args.pretrain,
                 k=k, post_alpha=post_alpha, normal_interval=args.interval, gan_interval=args.interval2,
                 G_steps=args.G_steps, D_steps=args.D_steps, save=args.save)
         # add result to list
