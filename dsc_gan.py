@@ -225,11 +225,11 @@ class ConvAE(object):
         return cost, Coef
 
     def partial_fit_disc(self, X, y_x, lr):
-        assert y_x.min() == 0, 'y_x is 0-based, but received min={}'.format(y_x.min())
+        #assert y_x.min() == 0, 'y_x is 0-based, but received min={}'.format(y_x.min())
         self.sess.run([self.optimizer_disc, self.clip_weight], feed_dict={self.x:X, self.y_x:y_x, self.learning_rate:lr})
 
     def partial_fit_eqn3plus(self, X, y_x, lr):
-        assert y_x.min() == 0, 'y_x is 0-based'
+        #assert y_x.min() == 0, 'y_x is 0-based'
         cost, Coef, summary, _ = self.sess.run([self.loss_recon, self.Coef, self.summaryop_eqn3plus, self.optimizer_eqn3plus], 
                 feed_dict={self.x:X, self.y_x:y_x, self.learning_rate:lr})
         self.summary_writer.add_summary(summary, self.iter)
