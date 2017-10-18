@@ -206,12 +206,12 @@ class ConvAE(object):
         for g in groups:
             g = tf.squeeze(g)
             N_g = tf.shape(g)[0]                                    # number of datapoints in this cluster
-            selector = tf.random_uniform([M, N_g])                  # make random selector matrix
-            selector = selector / tf.reduce_sum(selector, 1, keep_dims=True)# normalize each row to 1
-            #print selector.shape, g.shape, z_real.shape
-            num_selected = tf.shape(g)[0]
-            selected = tf.cond(tf.greater(num_selected, 0),  # perform selection, while bypassing groups with 0 samples
-                    lambda: tf.matmul(selector, g, name='matmul_selectfake'), lambda: tf.zeros(shape=[0, dim1]))
+            def make_selected():
+                selector = tf.random_uniform([M, N_g])                  # make random selector matrix
+                selector = selector / tf.reduce_sum(selector, 1, keep_dims=True)# normalize each row to 1
+                return tf.matmul(selector, g, name='matmul_selectfake')
+            selected = tf.cond(tf.greater(N_g, 0),  # perform selection, while bypassing groups with 0 samples
+                    make_selected, lambda: tf.zeros(shape=[0, dim1]))
             combined.append(selected)
         z_fake = tf.concat(combined, 0) # a matrix of KxM,
         return z_fake
