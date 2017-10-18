@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('name')                                     # name of experiment, used for creating log directory
 parser.add_argument('--lambda1',    type=float, default=1.0)
 parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan loss
-parser.add_argument('--lambda4',    type=float, default=0.01)   # lambda on AE L2 regularization
+parser.add_argument('--lambda4',    type=float, default=0.1)    # lambda on AE L2 regularization
 parser.add_argument('--pretrain',   type=int,   default=0)      # number of iterations of pretraining
 parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train on eqn3 and eqn3plus 
 parser.add_argument('--enable-at',  type=int,   default=1000)   # epoch at which to enable eqn3plus
@@ -409,7 +409,7 @@ def reinit_and_optimize(Img, Label, CAE, n_class, num_epochs=None, pretrain=0, k
 
     if num_epochs is None:
         num_epochs =  50 + n_class*25# 100+n_class*20
-    lr = 1.0e-3
+    lr = 2.0e-4
 
     # init
     CAE.initlization()
