@@ -21,17 +21,21 @@ parser.add_argument('--lambda2',    type=float, default=0.2)    # sparsity cost 
 parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan loss
 parser.add_argument('--lambda4',    type=float, default=0.1)    # lambda on AE L2 regularization
 parser.add_argument('--lr',         type=float, default=2e-4)   # learning rate
+parser.add_argument('--lr2',        type=float, default=2e-4)   # learning rate for discriminator and eqn3plus
 parser.add_argument('--pretrain',   type=int,   default=0)      # number of iterations of pretraining
 parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train on eqn3 and eqn3plus 
 parser.add_argument('--enable-at',  type=int,   default=1000)   # epoch at which to enable eqn3plus
 parser.add_argument('--dataset',    type=str,   default='yaleb', choices=['yaleb', 'orl', 'coil20', 'coil100'])
 parser.add_argument('--interval',   type=int,   default=50)
 parser.add_argument('--interval2',  type=int,   default=1)
-parser.add_argument('--bound',      type=float, default=0.02)
+parser.add_argument('--bound',      type=float, default=0.02)   # discriminator weight clipping limit
+parser.add_argument('--D-init',     type=int,   default=100)    # number of discriminators steps before eqn3plus starts
 parser.add_argument('--D-steps',    type=int,   default=1)
 parser.add_argument('--G-steps',    type=int,   default=1)
-parser.add_argument('--save',       action='store_true')
-parser.add_argument('--r',          type=int,   default=0)
+parser.add_argument('--save',       action='store_true')        # save pretrained model
+parser.add_argument('--r',          type=int,   default=0)      # Nxr rxN, use 0 to default to NxN Coef
+parser.add_argument('--z-c',        action='store_true')        # use z_c instead of z as z_real
+parser.add_argument('--stop-real',  action='store_true')        # cut z_real path 
 
 """
 Example launch commands:
@@ -47,6 +51,7 @@ CUDA_VISIBLE_DEVICES=0 python dsc_gan.py orl_run1   --pretrain 10000 --epochs 40
 
 class ConvAE(object):
     def __init__(self,
+            args,
             n_input, n_hidden, kernel_size, n_class, n_sample_perclass, disc_size,
             lambda1, lambda2, lambda3, batch_size, r=0,
             reg=None, disc_bound=0.02,
@@ -114,9 +119,9 @@ class ConvAE(object):
 
         # discriminator loss
         self.y_x    = tf.placeholder(tf.int32, [None])
-        self.z_real = z
+        self.z_real = z_c if args.z_c else z
         self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, self.n_sample_perclass)
-        self.score_disc = self.score_discriminator(self.z_real, self.z_fake)
+        self.score_disc = self.score_discriminator(self.z_real, self.z_fake, args.stop_real)
         disc_weights = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
         self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights)
         self.clip_weight = [v.assign(tf.clip_by_value(v, -disc_bound, disc_bound)) for v in disc_weights]
@@ -194,7 +199,9 @@ class ConvAE(object):
                 input = disc_i
         return input
 
-    def score_discriminator(self, z_real, z_fake):
+    def score_discriminator(self, z_real, z_fake, stop_real):
+        if stop_real:
+            z_real = tf.stop_gradient(z_real)
         score_real = self.discriminator(z_real)
         score_fake = self.discriminator(z_fake, reuse=True)
         score = tf.reduce_mean(score_real) - tf.reduce_mean(score_fake) # maximize score_real, minimize score_fake
@@ -410,59 +417,66 @@ def build_laplacian(C):
     return L
 
 
-def reinit_and_optimize(Img, Label, CAE, n_class, lr=2e-4, num_epochs=None, pretrain=0, k=10, post_alpha=3.5,
-        normal_interval=100, gan_interval=1, G_steps=1, D_steps=1, save=False):
+def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
     alpha = max(0.4 - (n_class-1)/10 * 0.1, 0.1)
     print alpha
 
     acc_= []
 
-    if num_epochs is None:
+    if args.epochs is None:
         num_epochs =  50 + n_class*25# 100+n_class*20
+    else:
+        num_epochs = args.epochs
 
     # init
     CAE.initlization()
 
+    ###
+    ### Stage 1: pretrain
+    ### 
     # if we skip pretraining, we restore already-trained model
-    if pretrain==0:
+    if args.pretrain==0:
         CAE.restore()
     # otherwise we pretrain the model first
     else:
-        print 'Pretrain for {} steps'.format(pretrain)
+        print 'Pretrain for {} steps'.format(args.pretrain)
         """
         After pretrain: 
             AE l2 norm   : 29
             Ae recon loss: 13372
         """
-        for epoch in xrange(1, pretrain+1):
+        for epoch in xrange(1, args.pretrain+1):
             minibatch_size = 128
             indices = np.random.permutation(Img.shape[0])[:minibatch_size]
             minibatch = Img[indices] # pretrain with random mini-batch
-            cost = CAE.partial_fit_pretrain(minibatch, lr)
+            cost = CAE.partial_fit_pretrain(minibatch, args.lr)
             if epoch % 100 == 0:
                 norm = CAE.get_ae_weight_norm()
                 print 'pretraining epoch {}, cost: {}, norm: {}'.format(epoch, cost/float(minibatch_size), norm)
-        if save:
+        if args.save:
             CAE.save_model()
-    # fine-tune network
+    ###
+    ### Stage 2: fine-tune network
+    ###
     print 'Finetune for {} steps'.format(num_epochs)
     acc_x = 0.0
     for epoch in xrange(1, num_epochs+1):
-        if epoch % 10 == 0:
-            print 'epoch {}'.format(epoch)
-        """
-        First 1000 epochs, just train on eqn3
-        Subsequent epochs, train on eqn3plus
-        """
-        if epoch <= args.enable_at: # 1000
-            cost, Coef = CAE.partial_fit_eqn3(Img, lr)
-            interval = normal_interval
+        # eqn3
+        if epoch < args.enable_at:
+            cost, Coef = CAE.partial_fit_eqn3(Img, args.lr)
+            interval = args.interval # normal interval
+        # overtrain discriminator
+        elif epoch == args.enable_at:
+            print 'Initialize discriminator for {} steps'.format(args.D_init)
+            for i in xrange(args.D_init):
+                CAE.partial_fit_disc(Img, y_x, args.lr2)
+        # eqn3plus
         else:
-            for i in xrange(D_steps):
-                CAE.partial_fit_disc(Img, y_x, lr)  # discriminator step discriminator
-            for i in xrange(G_steps):
-                cost, Coef = CAE.partial_fit_eqn3plus(Img, y_x, lr)
-            interval = gan_interval
+            for i in xrange(args.D_steps):
+                CAE.partial_fit_disc(Img, y_x, args.lr2)  # discriminator step discriminator
+            for i in xrange(args.G_steps):
+                cost, Coef = CAE.partial_fit_eqn3plus(Img, y_x, args.lr2)
+            interval = args.interval2 # GAN interval
         # every interval epochs, perform clustering and evaluate accuracy
         if epoch % interval == 0:
             print "epoch: %.1d" % epoch, "cost: %.8f" % (cost/float(batch_size))
@@ -611,15 +625,14 @@ if __name__ == '__main__':
         # clear graph and build a new conv-AE
         tf.reset_default_graph()
         CAE = ConvAE(
+                args,
                 n_input, n_hidden, kernel_size, n_class, n_sample_perclass, disc_size,
                 lambda1, lambda2, lambda3, batch_size, r=args.r,
                 reg=tf.contrib.layers.l2_regularizer(tf.ones(1)*args.lambda4), disc_bound=args.bound,
                 model_path=model_path, restore_path=restore_path, logs_path=logs_path)
 
         # perform optimization
-        avg_i, med_i = reinit_and_optimize(Img, Label, CAE, n_class, lr=args.lr, num_epochs=args.epochs, pretrain=args.pretrain,
-                k=k, post_alpha=post_alpha, normal_interval=args.interval, gan_interval=args.interval2,
-                G_steps=args.G_steps, D_steps=args.D_steps, save=args.save)
+        avg_i, med_i = reinit_and_optimize(args, Img, Label, CAE, n_class, k=k, post_alpha=post_alpha)
         # add result to list
         avg.append(avg_i)
         med.append(med_i)
