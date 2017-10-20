@@ -38,8 +38,10 @@ parser.add_argument('--z-c',        action='store_true')        # use z_c instea
 parser.add_argument('--stop-real',  action='store_true')        # cut z_real path 
 parser.add_argument('--s-closed',   action='store_true')        # compute selector S using closed-form solution
 parser.add_argument('--s-nodiag',   action='store_true')        # compute fake cluster using per-sample no-diag mixing
+parser.add_argument('--s-usesparse',action='store_true')        # compute fake cluster using per-sample no-diag mixing
 parser.add_argument('--s-lambda',   type=float, default=1)
 parser.add_argument('--s-tau',      type=float, default=0.995)
+parser.add_argument('--s-drop',     type=int,   default=3)
 
 """
 Example launch commands:
@@ -61,6 +63,7 @@ class ConvAE(object):
             reg=None, disc_bound=0.02,
             model_path = None, restore_path = None,
             logs_path = 'logs'):
+        self.args    = args
         self.n_class = n_class
         self.n_input = n_input
         self.n_hidden = n_hidden
@@ -71,6 +74,7 @@ class ConvAE(object):
         self.reg = reg
         self.model_path = model_path
         self.restore_path = restore_path
+        # record args
         self.iter = 0
 
         #input required to be fed
@@ -271,6 +275,11 @@ class ConvAE(object):
             GiGnoiT = tf.matmul(Gi, GnoiT)
             GnoiGnoiT = tf.matmul(Gnoi, GnoiT)
             Si      = tf.matmul(GiGnoiT, tf.matrix_inverse(lambd*tf.eye(N_g-1) + GnoiGnoiT))
+            if self.args.s_usesparse:
+                abs_si = tf.abs(Si)
+                abs_si_order = tf.nn.top_k(abs_si, k=(N_g-1)).indices
+                si_keep = abs_si_order < (N_g - 1 - self.args.s_drop) # throw 's_drop' elements away
+                Si = Si * tf.cast(si_keep, tf.float32)
             Ginew   = tf.matmul(Si, Gnoi)
             return [i+1, tf.concat([g_fake, Ginew], axis=0)] # add Ginew to g_fake
             #return [i+1, g_fake]
