@@ -37,6 +37,7 @@ parser.add_argument('--r',          type=int,   default=0)      # Nxr rxN, use 0
 parser.add_argument('--z-c',        action='store_true')        # use z_c instead of z as z_real
 parser.add_argument('--stop-real',  action='store_true')        # cut z_real path 
 parser.add_argument('--s-closed',   action='store_true')        # compute selector S using closed-form solution
+parser.add_argument('--s-nodiag',   action='store_true')        # compute fake cluster using per-sample no-diag mixing
 parser.add_argument('--s-lambda',   type=float, default=1)
 parser.add_argument('--s-tau',      type=float, default=0.995)
 
@@ -127,7 +128,7 @@ class ConvAE(object):
         self.s_tau    = tf.constant(args.s_tau, dtype=tf.float32)
         self.y_x    = tf.placeholder(tf.int32, [None])
         self.z_real = z_c if args.z_c else z
-        self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed)
+        self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed, use_nodiag=args.s_nodiag)
         self.score_disc = self.score_discriminator(self.z_real, self.z_fake, args.stop_real)
         disc_weights = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
         self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights)
@@ -215,41 +216,66 @@ class ConvAE(object):
         # a good discriminator would have a very positive score
         return score
 
-    def make_z_fake(self, z_real, y_x, n_class, n_sample_perclass, use_closedform=False):
+    def make_z_fake(self, z_real, y_x, n_class, n_sample_perclass, use_closedform=False, use_nodiag=False):
         """
         z_real: a 2432x1080 tensor, each row is a data point
         y_x   : a 2432 vector, indicating cluster membership of each data point
         n_class          : number of clusters
         n_sample_perclass: number of fake samples per cluster
         """
+        assert not (use_closedform and use_nodiag), '--s-closed and --s-nodiag, only one can be true'
         group_index = [tf.where(tf.equal(y_x, k))        for k in xrange(n_class)] # indices of datapoints in k-th cluster
         groups      = [tf.gather(z_real, group_index[k]) for k in xrange(n_class)] # datapoints in k-th cluster
         dim1 = tf.shape(z_real)[1]
         # for each group, take n_sample_perclass random combination as fake samples
         combined = []
         for g in groups:
-            g = tf.squeeze(g, name='g')
+            g = tf.squeeze(g, name='g', axis=1)
             N_g = tf.shape(g)[0]                                    # number of datapoints in this cluster
             def make_selected():
-                # use closed-form solution of EQN
-                if use_closedform:
+                # use per-sample closed-form mixing
+                if use_nodiag:
+                    lambd = self.s_lambda * self.s_tau ** (self.gen_step)
+                    return self.make_ugly_fake_cluster(g, N_g, lambd)
+                # use per-cluster closed-form mixing
+                elif use_closedform:
                     lambd = self.s_lambda * self.s_tau ** (self.gen_step)
                     gT  = tf.transpose(g)
                     ggT = tf.matmul(g, gT)
                     inverse = tf.matrix_inverse(lambd * tf.eye(N_g) + ggT)
                     selector = tf.matmul(ggT, inverse)
+                    return tf.matmul(selector, g, name='matmul_selectfake')
                 # use uniform sampling
                 else:
                     selector = tf.random_uniform([n_sample_perclass, N_g])          # make random selector matrix
                     selector = selector / tf.reduce_sum(selector, 1, keep_dims=True)# normalize each row to 1
-                # provide names
-                selector = tf.identity(selector, name='selector')
-                return tf.matmul(selector, g, name='matmul_selectfake')
+                    return tf.matmul(selector, g, name='matmul_selectfake')
             selected = tf.cond(tf.greater(N_g, 1),  # perform selection, while bypassing groups with 0 samples
-                    make_selected, lambda: tf.zeros(shape=[0, dim1]))
+                        make_selected, lambda: tf.zeros(shape=[0, dim1]))
             combined.append(selected)
         z_fake = tf.concat(combined, 0) # a matrix of KxM,
         return z_fake
+
+    def make_ugly_fake_cluster(self, g, N_g, lambd):
+        i = tf.constant(0)
+        dim1 = tf.shape(g)[1]
+        g_fake = tf.zeros([0, dim1]) # make empty matrix to contain fake samples
+        def cond(i, g_fake):
+            return tf.less(i, N_g)
+        index = tf.range(N_g)
+        def body(i, g_fake):
+            Gi      = tf.slice(g, begin=[i, 0], size=[1, -1])
+            indices = tf.where(tf.not_equal(index, i))
+            Gnoi    = tf.squeeze(tf.gather(g, indices), axis=1)
+            GnoiT   = tf.transpose(Gnoi)
+            GiGnoiT = tf.matmul(Gi, GnoiT)
+            GnoiGnoiT = tf.matmul(Gnoi, GnoiT)
+            Si      = tf.matmul(GiGnoiT, tf.matrix_inverse(lambd*tf.eye(N_g-1) + GnoiGnoiT))
+            Ginew   = tf.matmul(Si, Gnoi)
+            return [i+1, tf.concat([g_fake, Ginew], axis=0)] # add Ginew to g_fake
+            #return [i+1, g_fake]
+        _, g_fake = tf.while_loop(cond, body, loop_vars=[i, g_fake], shape_invariants=[i.get_shape(), tf.TensorShape([None, None]) ])
+        return g_fake
 
     def partial_fit_eqn3(self, X, lr):
         # take a step on Eqn 3/4
