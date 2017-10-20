@@ -41,7 +41,9 @@ parser.add_argument('--s-nodiag',   action='store_true')        # compute fake c
 parser.add_argument('--s-usesparse',action='store_true')        # compute fake cluster using per-sample no-diag mixing
 parser.add_argument('--s-lambda',   type=float, default=1)
 parser.add_argument('--s-tau',      type=float, default=0.995)
-parser.add_argument('--s-drop',     type=int,   default=3)
+parser.add_argument('--s-lambda2',  type=float, default=3.0)
+parser.add_argument('--s-tau2',     type=float, default=0.99)
+parser.add_argument('--s-sparse-min', type=int, default=5)      # minimum number of dimensions in S that should be kept
 
 """
 Example launch commands:
@@ -130,6 +132,8 @@ class ConvAE(object):
         self.gen_step_op = self.gen_step.assign(self.gen_step + 1)      # increment generator steps
         self.s_lambda = tf.constant(args.s_lambda, dtype=tf.float32)
         self.s_tau    = tf.constant(args.s_tau, dtype=tf.float32)
+        self.s_lambda2 = tf.constant(args.s_lambda2, dtype=tf.float32)
+        self.s_tau2    = tf.constant(args.s_tau2,    dtype=tf.float32)
         self.y_x    = tf.placeholder(tf.int32, [None])
         self.z_real = z_c if args.z_c else z
         self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed, use_nodiag=args.s_nodiag)
@@ -247,8 +251,17 @@ class ConvAE(object):
                     gT  = tf.transpose(g)
                     ggT = tf.matmul(g, gT)
                     inverse = tf.matrix_inverse(lambd * tf.eye(N_g) + ggT)
-                    selector = tf.matmul(ggT, inverse)
-                    return tf.matmul(selector, g, name='matmul_selectfake')
+                    S = tf.matmul(ggT, inverse, name='S')
+                    # if sparsity is requested, drop dimensions in S whose absolute value are small
+                    if self.args.s_usesparse:
+                        num_drop = tf.to_int32(self.s_lambda2 * self.s_tau2 ** (self.gen_step))
+                        num_keep = N_g - num_drop
+                        S_abs = tf.abs(S)
+                        S_abs
+                        S_abs_order = tf.nn.top_k(S_abs, k=N_g).indices
+                        S_abs_keep  = S_abs_order < tf.minimum(num_keep, self.args.s_sparse_min)
+                        S = S * tf.to_float(S_abs_keep)
+                    return tf.matmul(S, g, name='matmul_selectfake')
                 # use uniform sampling
                 else:
                     selector = tf.random_uniform([n_sample_perclass, N_g])          # make random selector matrix
