@@ -20,8 +20,10 @@ parser.add_argument('--lambda1',    type=float, default=1.0)
 parser.add_argument('--lambda2',    type=float, default=0.2)    # sparsity cost on C
 parser.add_argument('--lambda3',    type=float, default=1.0)    # lambda on gan loss
 parser.add_argument('--lambda4',    type=float, default=0.1)    # lambda on AE L2 regularization
+
 parser.add_argument('--lr',         type=float, default=2e-4)   # learning rate
 parser.add_argument('--lr2',        type=float, default=2e-4)   # learning rate for discriminator and eqn3plus
+
 parser.add_argument('--pretrain',   type=int,   default=0)      # number of iterations of pretraining
 parser.add_argument('--epochs',     type=int,   default=None)   # number of epochs to train on eqn3 and eqn3plus 
 parser.add_argument('--enable-at',  type=int,   default=1000)   # epoch at which to enable eqn3plus
@@ -34,16 +36,20 @@ parser.add_argument('--D-steps',    type=int,   default=1)
 parser.add_argument('--G-steps',    type=int,   default=1)
 parser.add_argument('--save',       action='store_true')        # save pretrained model
 parser.add_argument('--r',          type=int,   default=0)      # Nxr rxN, use 0 to default to NxN Coef
+
 parser.add_argument('--z-c',        action='store_true')        # use z_c instead of z as z_real
 parser.add_argument('--stop-real',  action='store_true')        # cut z_real path 
+parser.add_argument('--stationary', type=int,   default=1)      # update z_real every so generator epochs
+
 parser.add_argument('--s-closed',   action='store_true')        # compute selector S using closed-form solution
 parser.add_argument('--s-nodiag',   action='store_true')        # compute fake cluster using per-sample no-diag mixing
 parser.add_argument('--s-usesparse',action='store_true')        # compute fake cluster using per-sample no-diag mixing
 parser.add_argument('--s-lambda',   type=float, default=1)
 parser.add_argument('--s-tau',      type=float, default=0.995)
-parser.add_argument('--s-lambda2',  type=float, default=3.0)
+parser.add_argument('--s-lambda2',  type=float, default=3.0)    # initial number of dims to drop in S
 parser.add_argument('--s-tau2',     type=float, default=0.99)
 parser.add_argument('--s-sparse-min', type=int, default=5)      # minimum number of dimensions in S that should be kept
+
 
 """
 Example launch commands:
@@ -136,8 +142,12 @@ class ConvAE(object):
         self.s_tau2    = tf.constant(args.s_tau2,    dtype=tf.float32)
         self.y_x    = tf.placeholder(tf.int32, [None])
         self.z_real = z_c if args.z_c else z
+        self.z_real.set_shape([batch_size, self.latent_size])
+        self.z_real_stationary = tf.Variable(tf.zeros([batch_size, self.latent_size]), trainable=False)
+        self.z_real_stationary = tf.cond(tf.equal(self.gen_step % args.stationary, 0),
+                lambda: self.z_real_stationary.assign(self.z_real), lambda: self.z_real_stationary)
         self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed, use_nodiag=args.s_nodiag)
-        self.score_disc = self.score_discriminator(self.z_real, self.z_fake, args.stop_real)
+        self.score_disc = self.score_discriminator(self.z_real_stationary, self.z_fake, args.stop_real)
         disc_weights = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
         self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights)
         self.clip_weight = [v.assign(tf.clip_by_value(v, -disc_bound, disc_bound)) for v in disc_weights]
@@ -441,14 +451,11 @@ def post_proC(C, K, d, alpha):
     # C: coefficient matrix, K: number of clusters, d: dimension of each subspace
     C = 0.5*(C + C.T)
     r = d*K + 1 # K=38, d=10
-    t_begin = time.time()
     U, S, _ = svds(C,r,v0 = np.ones(C.shape[0]))
     #U, S, _ = svd_cuda(C, allocator=mem_pool)
     # take U and S from GPU
     # U = U[:, :r].get()
     # S = S[:r].get()
-    t_end = time.time()
-    print 'time1 = {}'.format(t_end - t_begin)
     U = U[:,::-1]
     S = np.sqrt(S[::-1])
     S = np.diag(S)
@@ -459,12 +466,9 @@ def post_proC(C, K, d, alpha):
     L = np.abs(Z ** alpha)
     L = L/L.max()
     L = 0.5 * (L + L.T)
-    t_begin = time.time()
     spectral = cluster.SpectralClustering(n_clusters=K, eigen_solver='arpack', affinity='precomputed',assign_labels='discretize')
     spectral.fit(L)
     grp = spectral.fit_predict(L) # +1
-    t_end = time.time()
-    print 'time2 = {}'.format(t_end - t_begin)
     return grp, L
 
 
@@ -512,7 +516,7 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
             Ae recon loss: 13372
         """
         for epoch in xrange(1, args.pretrain+1):
-            minibatch_size = 128
+            minibatch_size = Img.shape[0]#128
             indices = np.random.permutation(Img.shape[0])[:minibatch_size]
             minibatch = Img[indices] # pretrain with random mini-batch
             cost = CAE.partial_fit_pretrain(minibatch, args.lr)
@@ -627,6 +631,7 @@ def prepare_data_coil20(folder):
     mat = sio.loadmat(os.path.join(folder, 'COLT20fea2fea.mat'))
     Label = mat['label'].reshape(-1).astype(np.int32) # 1440
     Img = mat['fea'].reshape(-1, 32, 32, 1) * 100
+    #Img = normalize_data(Img)
 
     # constants
     n_input  = [32, 32]
@@ -661,6 +666,12 @@ def prepare_data_coil100(folder):
     all_subjects=[100]
     model_path  = os.path.join(folder, 'model-5-32x32-coil100-ckpt')
     return Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, disc_size, k, post_alpha, all_subjects, model_path
+
+
+def normalize_data(data):
+    data = data - data.mean(axis=0)
+    data = data / data.std(axis=0)
+    return data
 
 
 if __name__ == '__main__':
