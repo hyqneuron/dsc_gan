@@ -37,7 +37,6 @@ parser.add_argument('--G-steps',    type=int,   default=1)
 parser.add_argument('--save',       action='store_true')        # save pretrained model
 parser.add_argument('--r',          type=int,   default=0)      # Nxr rxN, use 0 to default to NxN Coef
 
-parser.add_argument('--z-c',        action='store_true')        # use z_c instead of z as z_real
 parser.add_argument('--stop-real',  action='store_true')        # cut z_real path 
 parser.add_argument('--stationary', type=int,   default=1)      # update z_real every so generator epochs
 
@@ -49,6 +48,8 @@ parser.add_argument('--s-tau',      type=float, default=0.995)
 parser.add_argument('--s-lambda2',  type=float, default=3.0)    # initial number of dims to drop in S
 parser.add_argument('--s-tau2',     type=float, default=0.99)
 parser.add_argument('--s-sparse-min', type=int, default=5)      # minimum number of dimensions in S that should be kept
+
+parser.add_argument('--submean',    action='store_true')
 
 
 """
@@ -141,15 +142,17 @@ class ConvAE(object):
         self.s_lambda2 = tf.constant(args.s_lambda2, dtype=tf.float32)
         self.s_tau2    = tf.constant(args.s_tau2,    dtype=tf.float32)
         self.y_x    = tf.placeholder(tf.int32, [None])
-        self.z_real = z_c if args.z_c else z
+        # make z_real and z_fake
+        self.z_real, self.z_fake = self.make_z_fake(z, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed, use_nodiag=args.s_nodiag)
+        # update z_real with delay
         self.z_real.set_shape([batch_size, self.latent_size])
         self.z_real_stationary = tf.Variable(tf.zeros([batch_size, self.latent_size]), trainable=False)
         self.z_real_stationary = tf.cond(tf.equal(self.gen_step % args.stationary, 0),
                 lambda: self.z_real_stationary.assign(self.z_real), lambda: self.z_real_stationary)
-        self.z_fake = self.make_z_fake(self.z_real, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed, use_nodiag=args.s_nodiag)
         self.score_disc = self.score_discriminator(self.z_real_stationary, self.z_fake, args.stop_real)
         disc_weights = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
-        self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights)
+        with tf.variable_scope('optimizer_disc'):
+            self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(-self.score_disc, var_list=disc_weights)
         self.clip_weight = [v.assign(tf.clip_by_value(v, -disc_bound, disc_bound)) for v in disc_weights]
 
         # Eqn 3 + generator loss
@@ -244,11 +247,15 @@ class ConvAE(object):
         assert not (use_closedform and use_nodiag), '--s-closed and --s-nodiag, only one can be true'
         group_index = [tf.where(tf.equal(y_x, k))        for k in xrange(n_class)] # indices of datapoints in k-th cluster
         groups      = [tf.gather(z_real, group_index[k]) for k in xrange(n_class)] # datapoints in k-th cluster
+        # remove extra dimension
+        groups      = [tf.squeeze(g, axis=1) for g in groups]
+        # subtract mean
+        if self.args.submean:
+            groups  = [g - tf.reduce_mean(g, 0, keep_dims=True) for g in groups]
         dim1 = tf.shape(z_real)[1]
         # for each group, take n_sample_perclass random combination as fake samples
         combined = []
         for g in groups:
-            g = tf.squeeze(g, name='g', axis=1)
             N_g = tf.shape(g)[0]                                    # number of datapoints in this cluster
             def make_selected():
                 # use per-sample closed-form mixing
@@ -281,7 +288,8 @@ class ConvAE(object):
                         make_selected, lambda: tf.zeros(shape=[0, dim1]))
             combined.append(selected)
         z_fake = tf.concat(combined, 0) # a matrix of KxM,
-        return z_fake
+        z_real_submean = tf.concat(groups, 0)
+        return z_real_submean, z_fake
 
     def make_ugly_fake_cluster(self, g, N_g, lambd):
         i = tf.constant(0)
@@ -516,7 +524,7 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
             Ae recon loss: 13372
         """
         for epoch in xrange(1, args.pretrain+1):
-            minibatch_size = Img.shape[0]#128
+            minibatch_size = 128
             indices = np.random.permutation(Img.shape[0])[:minibatch_size]
             minibatch = Img[indices] # pretrain with random mini-batch
             cost = CAE.partial_fit_pretrain(minibatch, args.lr)
