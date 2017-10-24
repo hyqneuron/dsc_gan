@@ -294,10 +294,6 @@ class ConvAE(object):
         for i, g in enumerate(groups):
             # computnig projection for the ith group using Ui
             N_g = tf.shape(g)[0]  # number of datapoints in this cluster
-            with tf.variable_scope('', reuse=reuse):
-                Ui = tf.get_variable('disc_w{}'.format(j), shape=[self.latent_size, self.rank],
-                                        initializer=layers.xavier_initializer())
-            z_projection = tf.matmul(tf.matmul(z, Ui), tf.transpose(Ui))
             label, loss = self.match_idx(g, reuse=reuse)
             reuse = True
             combined.append(loss / tf.to_float(N_g))
