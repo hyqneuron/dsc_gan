@@ -57,6 +57,8 @@ parser.add_argument('--s-sparse-min', type=int, default=5)      # minimum number
 parser.add_argument('--submean',    action='store_true')
 parser.add_argument('--proj-cluster', action='store_true')
 
+parser.add_argument('--noisestd',   type=float, default=0.2)
+
 
 """
 Example launch commands:
@@ -96,6 +98,7 @@ class ConvAE(object):
         #input required to be fed
         self.x = tf.placeholder(tf.float32, [None, n_input[0], n_input[1], 1])
         self.learning_rate = tf.placeholder(tf.float32, [])
+        self.x_target = self.x + tf.random_normal(shape=tf.shape(self.x), mean=0, stddev=args.noisestd, dtype=tf.float32)
 
         # run input through encoder, latent is the output, shape is the shape of encoder
         latent, shape = self.encoder(self.x)
@@ -127,7 +130,7 @@ class ConvAE(object):
         self.loss_aereg   = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES) # weight decay
 
         # Eqn 3 loss
-        self.loss_recon = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r, self.x), 2.0))
+        self.loss_recon = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(self.x_r, self.x_target), 2.0))
         self.loss_sparsity = tf.reduce_sum(tf.pow(self.Coef,2.0))
         self.loss_selfexpress = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(z_c, z), 2.0))
         self.loss_eqn3 = self.loss_recon + lambda1 * self.loss_sparsity + lambda2 * self.loss_selfexpress + self.loss_aereg
