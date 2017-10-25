@@ -153,7 +153,7 @@ class ConvAE(object):
         self.s_tau2    = tf.constant(args.s_tau2,    dtype=tf.float32)
         self.y_x    = tf.placeholder(tf.int32, [batch_size])
         # make z_real and z_fake
-        self.z_real, self.z_fake = self.make_z_fake(z, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed, use_nodiag=args.s_nodiag)
+        self.z_real, self.z_fake, self.y_fake = self.make_z_fake(z, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed, use_nodiag=args.s_nodiag)
         self.z_real_submean = (z - tf.reduce_mean(z, keep_dims=True))
         # update z_real with delay
         self.z_real.set_shape([batch_size, self.latent_size])
@@ -166,7 +166,7 @@ class ConvAE(object):
                 lambda: self.y_real_stationary.assign(self.y_x), lambda: self.y_real_stationary)
         ### write by myself
         print 'building discriminator'
-        score_loss = self.score_discriminator(self.z_real_stationary, self.y_real_stationary, self.z_fake, self.y_x, args.stop_real)
+        score_loss = self.score_discriminator(self.z_real_stationary, self.y_real_stationary, self.z_fake, self.y_fake, args.stop_real)
         print 'adding disc regularization'
         regulariz1 = self.regularization1(reuse=True)
         regulariz2 = self.regularization2(reuse=True)
@@ -426,7 +426,14 @@ class ConvAE(object):
             combined.append(selected)
         z_fake = tf.concat(combined, 0) # a matrix of KxM,
         z_real_submean = tf.concat(groups, 0)
-        return z_real_submean, z_fake
+        if use_nodiag or use_closedform:
+            assert False, 'y_fake for closed-form fake sampling not implemented yet'
+            y_fake = y_x
+        else:
+            y_fake = tf.tile(tf.range(0, n_class), [n_sample_perclass])
+            y_fake = tf.reshape(y_fake, [n_sample_perclass, n_class])
+            y_fake = tf.reshape(tf.transpose(y_fake), [-1])
+        return z_real_submean, z_fake, y_fake
 
     def make_ugly_fake_cluster(self, g, N_g, lambd):
         i = tf.constant(0)
