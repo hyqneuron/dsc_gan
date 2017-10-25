@@ -277,10 +277,10 @@ class ConvAE(object):
                 u = tf.nn.l2_normalize(u, dim=0)
                 uT = tf.transpose(u)
                 zu = tf.matmul(z, u)
-                s = tf.reduce_sum((z - tf.matmul(zu, uT)) ** 2)
+                s = tf.reduce_sum((z - tf.matmul(zu, uT)) ** 2) # within-group summing of residuals
                 combined.append(s)
         label = tf.argmax(combined, dimension=1)
-        loss = (1.0 + args.beta1) * tf.reduce_min(combined) - args.beta1 * tf.add_n(combined)
+        loss = (1.0 + args.beta1) * tf.reduce_min(combined) - args.beta1 * tf.add_n(combined) # pick minimum among Ui's
         return label, loss
 
     def compute_loss(self, z, y, reuse=False):
@@ -299,22 +299,47 @@ class ConvAE(object):
             N_g = tf.shape(g)[0]  # number of datapoints in this cluster
             label, loss = self.match_idx(g, reuse=reuse)
             reuse = True
-            combined.append(loss / tf.to_float(N_g))
+            combined.append(loss / tf.to_float(N_g)) # divide by N_g
 
-        return tf.add_n(combined) / self.n_class
+        return tf.add_n(combined) / self.n_class # divide by number of clusters
+
+    def compute_loss_new(self, z, y, reuse=False):
+        # rewrite
+        residuals = []
+        with tf.variable_scope('', reuse=reuse):
+            for i in xrange(self.n_class):
+                Ui = tf.get_variable('disc_w{}'.format(i), shape=[self.latent_size, self.rank],
+                                        initializer=layers.xavier_initializer())
+                proj  = tf.matmul(z, Ui)
+                recon = tf.matmul(proj, tf.transpose(Ui))
+                diffsqr = (z-recon)**2                          # NxD
+                residual = tf.reduce_sum(diffsqr, axis=1)       # N
+                residuals.append(residual)
+        residuals = tf.stack(residuals, axis=1)             # NxK
+        ### 
+        group_index = [tf.where(tf.equal(y, k)) for k in xrange(self.n_class)]  # indices of datapoints in k-th cluster
+        #groups = [tf.gather(z, group_index[k]) for k in xrange(self.n_class)]  # datapoints in k-th cluster
+        group_residual = [tf.gather(residuals, group_index[k]) for k in xrange(self.n_class)]   
+        group_residual = [tf.squeeze(gr, axis=1) for gr in group_residual]                  # K of N_gxK
+        # sum within each group
+        group_totalres = tf.stack([tf.reduce_mean(gr, axis=0) for gr in group_residual])    # K of K, stacked to KxK
+        group_i        = tf.argmin(group_totalres)                                          # K
+        group_minres = []
+        for i in xrange(self.n_class):
+            group_minres.append(group_totalres[i, tf.to_int32(group_i[i])])
+        return tf.reduce_mean(group_minres)
 
     def score_discriminator(self, z_real, y_real, z_fake, y_fake, stop_real):
         if stop_real:
             z_real = tf.stop_gradient(z_real)
 
-        loss_real = self.compute_loss(z_real, y_real)
-        loss_fake = self.compute_loss(z_fake, y_fake, reuse=True)
+        loss_real = self.compute_loss_new(z_real, y_real)
+        loss_fake = self.compute_loss_new(z_fake, y_fake, reuse=True)
 
         #score = tf.reduce_mean(loss_real) - tf.reduce_mean(loss_fake) # maximize score_real, minimize score_fake
         score = loss_real - loss_fake  # maximize score_real, minimize score_fake
         # a good discriminator would have a very positive score
         return score
-
 
     def regularization1(self, reuse=False):
         combined=[]
@@ -698,6 +723,7 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
                 print '================================================'
                 print 'Warning: clustering produced empty clusters'
                 print '================================================'
+                print len(set(list(np.squeeze(y_x_new))))
             missrate_x = err_rate(Label, y_x)
             t_end = time.time()
             acc_x = 1 - missrate_x
