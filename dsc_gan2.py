@@ -55,6 +55,7 @@ parser.add_argument('--s-tau2',     type=float, default=0.99)
 parser.add_argument('--s-sparse-min', type=int, default=5)      # minimum number of dimensions in S that should be kept
 
 parser.add_argument('--submean',    action='store_true')
+parser.add_argument('--proj-cluster', action='store_true')
 
 
 """
@@ -150,6 +151,7 @@ class ConvAE(object):
         self.y_x    = tf.placeholder(tf.int32, [batch_size])
         # make z_real and z_fake
         self.z_real, self.z_fake = self.make_z_fake(z, self.y_x, self.n_class, self.n_sample_perclass, use_closedform=args.s_closed, use_nodiag=args.s_nodiag)
+        self.z_real_submean = (z - tf.reduce_mean(z, keep_dims=True))
         # update z_real with delay
         self.z_real.set_shape([batch_size, self.latent_size])
         self.z_real_stationary = tf.Variable(tf.zeros([batch_size, self.latent_size]), trainable=False)
@@ -168,6 +170,7 @@ class ConvAE(object):
         self.score_disc =  args.beta2 * regulariz1 + args.beta3 * regulariz2 - score_loss
 
         disc_weights = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
+        self.disc_weights = disc_weights
 
         ##
         print 'initing u'
@@ -460,6 +463,19 @@ class ConvAE(object):
         loss_recon_pre, = self.sess.run([self.loss_recon_pre], feed_dict={self.x:X})
         return loss_recon_pre
 
+    def get_projection_y_x(self, X):
+        disc_weights = self.sess.run(self.disc_weights)
+        z_real = self.sess.run(self.z_real_submean, feed_dict={self.x:X})
+        residuals = []
+        for Ui in disc_weights:
+            proj  = np.matmul(z_real, Ui)
+            recon = np.matmul(proj, Ui.transpose())
+            residual = ((z_real - recon)**2).sum(axis=1)
+            residuals.append(residual)
+        residuals = np.stack(residuals, axis=1) # Nxn_class
+        y_x = residuals.argmin(1)
+        return y_x
+        
     def log_accuracy(self, accuracy):
         summary = tf.Summary(value=[tf.Summary.Value(tag='accuracy', simple_value=accuracy)])
         self.summary_writer.add_summary(summary, self.iter)
@@ -646,7 +662,7 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
     ###
     print 'Finetune for {} steps'.format(num_epochs)
     acc_x = 0.0
-    initialized = False
+    y_x_mode = 'svd'
     for epoch in xrange(1, num_epochs+1):
         # eqn3
         if epoch < args.enable_at:
@@ -658,6 +674,8 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
             CAE.assign_u_parameter(Img, y_x)
             for i in xrange(args.D_init):
                 CAE.partial_fit_disc(Img, y_x, args.lr2)
+            if args.proj_cluster:
+                y_x_mode = 'projection'
         # eqn3plus
         else:
             for i in xrange(args.D_steps):
@@ -670,7 +688,10 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
             print "epoch: %.1d" % epoch, "cost: %.8f" % (cost/float(batch_size))
             Coef = thrC(Coef,alpha)
             t_begin = time.time()
-            y_x_new, _ = post_proC(Coef, n_class, k, post_alpha)
+            if y_x_mode == 'svd':
+                y_x_new, _ = post_proC(Coef, n_class, k, post_alpha)
+            else:
+                y_x_new = CAE.get_projection_y_x(Img)
             if len(set(list(np.squeeze(y_x_new)))) == n_class:
                 y_x = y_x_new
             else:
