@@ -33,3 +33,58 @@ has significant variance.
 [ ] Allow tuning of number of conv-layers and disc size
 [ ] Nxr rxN
 
+
+# coil20 experiments
+
+Without GAN
+
+- coil20_1: pretrain 10000, epochs 1000, enableat 1000
+- coil20_2: pretrain     1, epochs 1000, enableat 1000
+- coil20_3: pretrain 10000, epochs 1000, enableat 1000, lambda4 100
+- coil20_4: pretrain 10000, epochs 1000, enableat 1000, lambda1 100
+- coil20_5: pretrain 10000, epochs 1000, enableat 1000, lambda1 10000
+- coil20_6: pretrain 10000, epochs 1000, enableat 1000, lambda1 100000
+- coil20_7: pretrain 10000, epochs 1000, enableat 1000, lambda1 1000000
+
+- coil20_m1: pretrain 3500, epochs 500, enableat1000, lambda2 20, alpha 0.12
+
+# ORL exps
+
+submean, one2one, no-uni-norm
+all run with lr=0.001
+orl_000:
+orl_001:
+orl_010:
+orl_100:
+
+all run with lr=0.0002
+orl_000_2:
+orl_001_2:
+orl_010_2:
+orl_100_2:
+
+all run with lr=0.001, but enable-at 200
+orl_000_3:
+orl_001_3:
+orl_010_3:
+orl_100_3:
+
+all run with lr=0.001, but enable-at 100
+orl_000_4:
+orl_001_4:
+orl_010_4:
+orl_100_4:
+
+all run with lr=0.001, but enable-at 51
+orl_000_5:
+orl_001_5:
+orl_010_5:
+orl_100_5:
+
+Without uniform normalization, training seem somewhat unstable.
+There seems to be a bug in submean
+
+So the best so far seems to be orl_010_4
+
+orl_010_4_a0.05 to orl_010_4_a0.11 search for alpha. Turns out the default value 0f 0.1 was best
+

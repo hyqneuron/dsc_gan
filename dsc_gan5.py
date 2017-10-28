@@ -20,12 +20,12 @@ parser.add_argument('--lambda2', type=float, default=0.2)  # sparsity cost on C
 parser.add_argument('--lambda3', type=float, default=1.0)  # lambda on gan loss
 parser.add_argument('--lambda4', type=float, default=0.1)  # lambda on AE L2 regularization
 
-parser.add_argument('--lr', type=float, default=2e-4)  # learning rate
+parser.add_argument('--lr',  type=float, default=1e-3)  # learning rate
 parser.add_argument('--lr2', type=float, default=2e-4)  # learning rate for discriminator and eqn3plus
 
 parser.add_argument('--pretrain', type=int, default=0)  # number of iterations of pretraining
-parser.add_argument('--epochs', type=int, default=None)  # number of epochs to train on eqn3 and eqn3plus
-parser.add_argument('--enable-at', type=int, default=1000)  # epoch at which to enable eqn3plus
+parser.add_argument('--epochs', type=int, default=1000)  # number of epochs to train on eqn3 and eqn3plus
+parser.add_argument('--enable-at', type=int, default=300)  # epoch at which to enable eqn3plus
 parser.add_argument('--dataset', type=str, default='yaleb', choices=['yaleb', 'orl', 'coil20', 'coil100'])
 parser.add_argument('--interval', type=int, default=50)
 parser.add_argument('--interval2', type=int, default=1)
@@ -44,8 +44,12 @@ parser.add_argument('--beta3', type=float, default=0.010)  # promote org of subs
 parser.add_argument('--stop-real', action='store_true')  # cut z_real path
 parser.add_argument('--stationary', type=int, default=1)  # update z_real every so generator epochs
 
-parser.add_argument('--submean', action='store_true')
-parser.add_argument('--proj-cluster', action='store_true')
+parser.add_argument('--submean',        action='store_true')
+parser.add_argument('--proj-cluster',   action='store_true')
+
+parser.add_argument('--no-uni-norm',    action='store_true')
+parser.add_argument('--one2one',      action='store_true')
+parser.add_argument('--alpha',          type=float, default=0.1)
 
 """
 Example launch commands:
@@ -141,27 +145,15 @@ class ConvAE(object):
         self.gen_step = tf.Variable(0, dtype=tf.float32, trainable=False)  # keep track of number of generator steps
         self.gen_step_op = self.gen_step.assign(self.gen_step + 1)  # increment generator steps
         self.y_x = tf.placeholder(tf.int32, [batch_size])
-        # make z_real and z_fake
-        self.z_real_submean = (z - tf.reduce_mean(z, keep_dims=True))
-        # update z_real with delay
         self.z.set_shape([batch_size, self.latent_size])
-        self.z_real_stationary = tf.Variable(tf.zeros([batch_size, self.latent_size]), trainable=False)
-        self.z_real_stationary = tf.cond(tf.equal(self.gen_step % args.stationary, 0),
-                                         lambda: self.z_real_stationary.assign(self.z),
-                                         lambda: self.z_real_stationary)
-        ### write by myself
-        self.y_real_stationary = tf.Variable(tf.zeros([batch_size], dtype=tf.int32), trainable=False)
-        self.y_real_stationary = tf.cond(tf.equal(self.gen_step % args.stationary, 0),
-                                         lambda: self.y_real_stationary.assign(self.y_x),
-                                         lambda: self.y_real_stationary)
         ### write by myself
         print 'building discriminator'
         self.Us = self.make_Us()
         u_primes = self.svd_initialization(self.z, self.y_x)
         self.u_ini = [tf.assign(u, u_prime) for u, u_prime in zip(self.Us, u_primes)]
 
-        z_real = tf.stop_gradient(self.z_real_stationary) if args.stop_real else self.z_real_stationary
-        self.score_disc, self.Us_update_op = self.compute_disc_loss(z_real, self.y_real_stationary)
+        z_real = tf.stop_gradient(self.z) if args.stop_real else self.z
+        self.score_disc, self.Us_update_op = self.compute_disc_loss(z_real, self.y_x)
 
         print 'adding disc regularization'
         regulariz1 = self.regularization1(reuse=True)
@@ -187,8 +179,10 @@ class ConvAE(object):
         s3 = tf.summary.scalar("loss_selfexpress", self.loss_selfexpress)
         s4 = tf.summary.scalar("score_disc", self.score_disc)
         s5 = tf.summary.scalar("ae_l2_norm", self.ae_weight_norm)  # 29.8
+        s6 = tf.summary.scalar("disc_real",  self.disc_score_real)
+        s7 = tf.summary.scalar("disc_fake",  self.disc_score_fake)
         self.summaryop_eqn3 = tf.summary.merge([s1, s2, s3, s5])
-        self.summaryop_eqn3plus = tf.summary.merge([s1, s2, s3, s4, s5])
+        self.summaryop_eqn3plus = tf.summary.merge([s1, s2, s3, s4, s5, s6, s7])
         self.summaryop_pretrain = tf.summary.merge([s0, s5])
         self.init = tf.global_variables_initializer()
         config = tf.ConfigProto()
@@ -259,7 +253,8 @@ class ConvAE(object):
     def uniform_recombine(self, g):
         N_g = tf.shape(g)[0]
         selector = tf.random_uniform([N_g, N_g])  # make random selector matrix
-        selector = selector / tf.reduce_sum(selector, 1, keep_dims=True)  # normalize each row to 1
+        if not self.args.no_uni_norm:
+            selector = selector / tf.reduce_sum(selector, 1, keep_dims=True)  # normalize each row to 1
         g_fake = tf.matmul(selector, g, name='matmul_selectfake')
         return g_fake
 
@@ -315,6 +310,8 @@ class ConvAE(object):
         group_sreal = tf.convert_to_tensor(group_sreal)
 
         group_new_loss = []
+        group_loss_real = []
+        group_loss_fake = []
         Us_assign_ops = []
         # identify the ones that are assigned to Ui but aren't the cluster with minimum residual, and do
         # reinitialization on them
@@ -323,15 +320,18 @@ class ConvAE(object):
             label = group_label[i]
             sreal = group_sreal[i]
             u     = group_u[i]
-            # indices of groups, whose label are the same as current one
-            idxs_with_label  = tf.where(tf.equal(group_label, label))
-            # sreal of those corresponding groups
-            sreal_with_label = tf.squeeze(tf.gather(group_sreal, idxs_with_label), 1)
-            # among all those groups with the same label, whether current group has minimal sreal
-            ismin = tf.equal(sreal, tf.reduce_min(sreal_with_label))
-            # if it's the minimum, just use, otherwise reinit u
-            uu = tf.assign(self.Us[i], tf.cond(ismin, lambda: u, lambda: self.get_u_init_for_g(g)))
-            u = tf.nn.l2_normalize(uu, dim=0)
+            u = tf.nn.l2_normalize(u, dim=0)
+            if self.args.one2one:
+                # indices of groups, whose label are the same as current one
+                idxs_with_label  = tf.where(tf.equal(group_label, label))
+                # sreal of those corresponding groups
+                sreal_with_label = tf.squeeze(tf.gather(group_sreal, idxs_with_label), 1)
+                # among all those groups with the same label, whether current group has minimal sreal
+                ismin = tf.equal(sreal, tf.reduce_min(sreal_with_label))
+                # if it's the minimum, just use, otherwise reinit u
+                uu = tf.assign(self.Us[i], tf.cond(ismin, lambda: u, lambda: self.get_u_init_for_g(g)))
+                u = tf.nn.l2_normalize(uu, dim=0)
+                Us_assign_ops.append(uu)
             # recompute loss
             g_fake = self.uniform_recombine(g)
             loss_real = tf.reduce_sum((g      - tf.matmul(tf.matmul(g,      u), tf.transpose(u))) ** 2) / tf.to_float(N_g)
@@ -339,9 +339,12 @@ class ConvAE(object):
             loss = loss_real - loss_fake
             # add to list
             group_new_loss.append(loss)
-            Us_assign_ops.append(uu)
+            group_loss_real.append(loss_real)
+            group_loss_fake.append(loss_fake)
+        self.disc_score_real = tf.reduce_mean(group_loss_real)
+        self.disc_score_fake = tf.reduce_mean(group_loss_fake)
 
-        return tf.reduce_mean(group_new_loss), tf.group(*Us_assign_ops)
+        return -tf.reduce_mean(group_new_loss), tf.group(*Us_assign_ops)
 
     def regularization1(self, reuse=False):
         combined = []
@@ -563,7 +566,7 @@ def build_laplacian(C):
 
 
 def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
-    alpha = max(0.4 - (n_class - 1) / 10 * 0.1, 0.1)
+    alpha = args.alpha #max(0.4 - (n_class - 1) / 10 * 0.1, 0.1)
     print
     alpha
 
