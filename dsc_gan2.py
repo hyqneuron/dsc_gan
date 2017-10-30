@@ -109,6 +109,8 @@ class ConvAE(object):
         z = tf.reshape(latent, [batch_size, -1])
         if r==0:
             Coef = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size],tf.float32), name = 'Coef')
+            self.coef_init = tf.placeholder(tf.float32, tf.shape(Coef))
+            self.coef_assign = Coef.assign(self.coef_init)
         else:
             v = (1e-2) / r
             L = tf.Variable(v * tf.ones([self.batch_size, r]), name='Coef_L')
@@ -510,6 +512,9 @@ class ConvAE(object):
         residuals = np.stack(residuals, axis=1) # Nxn_class
         y_x = residuals.argmin(1)
         return y_x
+
+    def assign_coef(self, coef_init):
+        self.sess.run(self.coef_assign, feed_dict={self.coef_init: coef_init})
         
     def log_accuracy(self, accuracy):
         summary = tf.Summary(value=[tf.Summary.Value(tag='accuracy', simple_value=accuracy)])
@@ -667,6 +672,7 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
 
     # init
     CAE.initlization()
+    # CAE.assign_coef(new_coef)
 
     ###
     ### Stage 1: pretrain
