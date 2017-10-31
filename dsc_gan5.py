@@ -46,10 +46,18 @@ parser.add_argument('--stationary', type=int, default=1)  # update z_real every 
 
 parser.add_argument('--submean',        action='store_true')
 parser.add_argument('--proj-cluster',   action='store_true')
+parser.add_argument('--usebn',          action='store_true')
 
 parser.add_argument('--no-uni-norm',    action='store_true')
 parser.add_argument('--one2one',      action='store_true')
 parser.add_argument('--alpha',          type=float, default=0.1)
+
+parser.add_argument('--matfile',        default=None)
+parser.add_argument('--imgmult',        type=float,     default=1.0)
+parser.add_argument('--palpha',         type=float,     default=None)
+parser.add_argument('--kernel-size',    type=int,       nargs='+',  default=None)
+
+parser.add_argument('--m',              type=float,     default=None)
 
 """
 Example launch commands:
@@ -96,6 +104,11 @@ class ConvAE(object):
 
         # self-expressive layer
         z = tf.reshape(latent, [batch_size, -1])
+        z.set_shape([batch_size, self.latent_size])
+
+        if args.usebn:
+            z = tf.contrib.layers.batch_norm(z)
+
         if r == 0:
             Coef = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size], tf.float32), name='Coef')
         else:
@@ -145,14 +158,13 @@ class ConvAE(object):
         self.gen_step = tf.Variable(0, dtype=tf.float32, trainable=False)  # keep track of number of generator steps
         self.gen_step_op = self.gen_step.assign(self.gen_step + 1)  # increment generator steps
         self.y_x = tf.placeholder(tf.int32, [batch_size])
-        self.z.set_shape([batch_size, self.latent_size])
         ### write by myself
         print 'building discriminator'
         self.Us = self.make_Us()
         u_primes = self.svd_initialization(self.z, self.y_x)
         self.u_ini = [tf.assign(u, u_prime) for u, u_prime in zip(self.Us, u_primes)]
 
-        z_real = tf.stop_gradient(self.z) if args.stop_real else self.z
+        z_real = self.z
         self.score_disc, self.Us_update_op = self.compute_disc_loss(z_real, self.y_x)
 
         print 'adding disc regularization'
@@ -333,9 +345,16 @@ class ConvAE(object):
                 u = tf.nn.l2_normalize(uu, dim=0)
                 Us_assign_ops.append(uu)
             # recompute loss
+            g = g / tf.norm(g, axis=1, keep_dims=True)
             g_fake = self.uniform_recombine(g)
             loss_real = tf.reduce_sum((g      - tf.matmul(tf.matmul(g,      u), tf.transpose(u))) ** 2) / tf.to_float(N_g)
-            loss_fake = tf.reduce_sum((g_fake - tf.matmul(tf.matmul(g_fake, u), tf.transpose(u))) ** 2) / tf.to_float(N_g)
+            loss_fake = tf.reduce_sum((g_fake - tf.matmul(tf.matmul(g_fake, u), tf.transpose(u))) ** 2, axis=1) 
+            if self.args.m:
+                loss_fake = self.args.m - loss_fake
+                loss_fake = -tf.nn.relu(loss_fake)
+            loss_fake = tf.reduce_sum(loss_fake) / tf.to_float(N_g)
+            if self.args.stop_real:
+                loss_real = tf.stop_gradient(loss_real)
             loss = loss_real - loss_fake
             # add to list
             group_new_loss.append(loss)
@@ -539,8 +558,8 @@ def post_proC(C, K, d, alpha):
     U = U.dot(S)
     U = normalize(U, norm='l2', axis=1)
     Z = U.dot(U.T)
-    Z = Z * (Z > 0)
-    L = np.abs(Z ** alpha)
+    #Z = Z * (Z > 0)
+    L = np.abs(np.abs(Z) ** alpha)
     L = L / L.max()
     L = 0.5 * (L + L.T)
     spectral = cluster.SpectralClustering(n_clusters=K, eigen_solver='arpack', affinity='precomputed',
@@ -602,8 +621,7 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
             cost = CAE.partial_fit_pretrain(minibatch, args.lr)
             if epoch % 100 == 0:
                 norm = CAE.get_ae_weight_norm()
-                print
-                'pretraining epoch {}, cost: {}, norm: {}'.format(epoch, cost / float(minibatch_size), norm)
+                print 'pretraining epoch {}, cost: {}, norm: {}'.format(epoch, cost / float(minibatch_size), norm)
         if args.save:
             CAE.save_model()
     ###
@@ -665,7 +683,7 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
 
 def prepare_data_YaleB(folder):
     # load face images and labels
-    mat = sio.loadmat(os.path.join(folder, 'YaleBCrop025.mat'))
+    mat = sio.loadmat(os.path.join(folder, args.matfile or 'YaleBCrop025.mat'))
     img = mat['Y']
 
     # Reorganize data a bit, put images into Img, and labels into Label
@@ -697,7 +715,7 @@ def prepare_data_YaleB(folder):
 
 
 def prepare_data_orl(folder):
-    mat = sio.loadmat(os.path.join(folder, 'ORL2fea.mat'))
+    mat = sio.loadmat(os.path.join(folder, args.matfile or 'ORL2fea.mat'))
     Label = mat['label'].reshape(400).astype(np.int32)
     Img = mat['fea'].reshape(400, 32, 32, 1) * 100
 
@@ -717,15 +735,15 @@ def prepare_data_orl(folder):
 
 
 def prepare_data_coil20(folder):
-    mat = sio.loadmat(os.path.join(folder, 'COLT20fea2fea.mat'))
+    mat = sio.loadmat(os.path.join(folder, args.matfile or 'COIL20RRstd.mat'))
     Label = mat['label'].reshape(-1).astype(np.int32)  # 1440
-    Img = mat['fea'].reshape(-1, 32, 32, 1) * 100
+    Img = mat['fea'].reshape(-1, 32, 32, 1)
     # Img = normalize_data(Img)
 
     # constants
     n_input = [32, 32]
     n_hidden = [15]
-    kernel_size = [3]
+    kernel_size = args.kernel_size or [3]
     n_sample_perclass = Img.shape[0] / 20
     disc_size = [50, 1]
     # tunable numbers
@@ -738,9 +756,9 @@ def prepare_data_coil20(folder):
 
 
 def prepare_data_coil100(folder):
-    mat = sio.loadmat(os.path.join(folder, 'COLT100fea2fea.mat'))
+    mat = sio.loadmat(os.path.join(folder, args.matfile or 'COLT100fea2fea.mat'))
     Label = mat['label'].reshape(-1).astype(np.int32)  # 1440
-    Img = mat['fea'].reshape(-1, 32, 32, 1) * 100
+    Img = mat['fea'].reshape(-1, 32, 32, 1)
 
     # constants
     n_input = [32, 32]
@@ -776,7 +794,9 @@ if __name__ == '__main__':
         'coil100': prepare_data_coil100}
     assert args.dataset in preparation_funcs
     Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, disc_size, k, post_alpha, all_subjects, model_path = \
-    preparation_funcs[args.dataset](folder)
+            preparation_funcs[args.dataset](folder)
+    Img = Img*args.imgmult
+    post_alpha = args.palpha or post_alpha
     logs_path = os.path.join(folder, 'logs', args.name)
     restore_path = model_path
 

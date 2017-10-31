@@ -46,7 +46,19 @@ Without GAN
 - coil20_6: pretrain 10000, epochs 1000, enableat 1000, lambda1 100000
 - coil20_7: pretrain 10000, epochs 1000, enableat 1000, lambda1 1000000
 
-- coil20_m1: pretrain 3500, epochs 500, enableat1000, lambda2 20, alpha 0.12
+- coil_m1: pretrain 3500, epochs 500, enableat1000, lambda2 20, alpha 0.12
+- coil_m2: pretrain 3500, epochs 500, enableat1000, lambda2 20, alpha 0.12
+- coil_m3: pretrain 3500, epochs 500, enableat1000, lambda2 20, alpha 0.12
+- coil_m4: pretrain 3500, epochs 500, enableat1000, lambda2 20, alpha 0.12, lr0.0004
+- coil_m5: pretrain 6000, epochs 700, enableat1000, lambda2 20, alpha 0.12, lr0.0004
+- coil_m6: pretrain 6000, epochs 1000, enableat2000, lambda2 20, alpha 0.12, lr0.0004
+- coil_m7: pretrain 6000, epochs 1000, enableat2000, lambda2 20, alpha 0.12, lr0.0002
+- coil_m8: pretrain 5000, epochs 1000, enableat2000, lambda2 20, alpha 0.12, lr0.0002
+
+- coil_m3raw: pretrain 3500, epochs 500, enableat1000, lambda2 20, alpha 0.12, COIL20RRRaw
+- coil_m3dim: pretrain 3500, epochs 500, enableat1000, lambda2 20, alpha 0.12, COIL20RRdimension
+
+- coil_k1: pretrain 3500, epochs 500, enable-at 1000, lambda2 20, alpha 0.12, kernel_size 5
 
 # ORL exps
 
