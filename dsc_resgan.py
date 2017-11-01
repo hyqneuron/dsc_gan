@@ -57,7 +57,8 @@ parser.add_argument('--imgmult',        type=float,     default=1.0)
 parser.add_argument('--palpha',         type=float,     default=None)
 parser.add_argument('--kernel-size',    type=int,       nargs='+',  default=None)
 
-parser.add_argument('--m',              type=float,     default=None)
+parser.add_argument('--k1',             type=int,       default=1)
+parser.add_argument('--k2',             type=int,       default=1)
 
 """
 Example launch commands:
@@ -166,16 +167,18 @@ class ConvAE(object):
 
         z_real = self.z
         # step1
+        print 'building u_assign_op'
         self.u_assign_op = self.set_u_op(z_real, self.y_x)
 
         # step2
+        print 'building loss_u and resi_*'
         self.loss_u, resi_real, resi_fake = self.get_u_loss()
         self.score_disc  = self.compute_score_disc(resi_real, resi_fake)
         disc_weights = [v for v in tf.trainable_variables() if v.name.startswith('disc')]
 
-        print 'adding disc regularization'
-        regulariz1 = self.regularization1(reuse=True)
-        regulariz2 = self.regularization2(reuse=True)
+        print 'adding U regularization'
+        regularize1 = self.regularization1(reuse=True)
+        regularize2 = self.regularization2(reuse=True)
 
         # putting the losses together
         self.loss_u_combined  = self.loss_u + args.beta2 * regularize1 + args.beta3 * regularize2
@@ -186,7 +189,7 @@ class ConvAE(object):
         # step2
         print 'building optimizer for u_combined'
         with tf.variable_scope('optimizer_u_combined'):
-            self.optimizer_u_combined = tf.train.AdamOptimizer(self.learning_rate, beta1=0.0).minimize(self.loss_u_combined, var_list=self.Us)
+            self.optimizer_u_combined = tf.train.AdamOptimizer(self.learning_rate*0.0001, beta1=0.0).minimize(self.loss_u_combined, var_list=self.Us)
 
         # step3
         print 'building optimizer for ae_combined'
@@ -210,13 +213,13 @@ class ConvAE(object):
         s1 = tf.summary.scalar("loss_recon", self.loss_recon)
         s2 = tf.summary.scalar("loss_sparsity", self.loss_sparsity)
         s3 = tf.summary.scalar("loss_selfexpress", self.loss_selfexpress)
-        s4 = tf.summary.scalar("score_disc", self.score_disc)
         s5 = tf.summary.scalar("ae_l2_norm", self.ae_weight_norm)  # 29.8
+        s4 = tf.summary.scalar("score_disc", self.score_disc)
         s6 = tf.summary.scalar("disc_real",  self.disc_score_real)
         s7 = tf.summary.scalar("disc_fake",  self.disc_score_fake)
         self.summaryop_eqn3 = tf.summary.merge([s1, s2, s3, s5])
-        self.summaryop_eqn3plus = tf.summary.merge([s1, s2, s3, s4, s5, s6, s7])
         self.summaryop_pretrain = tf.summary.merge([s0, s5])
+        self.summaryop_eqn3plus = tf.summary.merge([s1, s2, s3, ])
         self.init = tf.global_variables_initializer()
         config = tf.ConfigProto()
         # config.gpu_options.allow_growth = True  # stop TF from eating up all GPU RAM
@@ -225,6 +228,8 @@ class ConvAE(object):
         self.sess.run(self.init)
         self.saver = tf.train.Saver([v for v in ae_weights if v.name.startswith('enc_w') or v.name.startswith('dec_w')])
         self.summary_writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph(), flush_secs=20)
+        # DEBUG
+        self.build_checkops()
 
     # Building the encoder
     def encoder(self, x):
@@ -392,6 +397,7 @@ class ConvAE(object):
         for i, g in enumerate(groups):
             N_g = tf.shape(g)[0]
             u   = self.Us[i]
+            u   = tf.nn.l2_normalize(u, dim=0)
             g_fake = self.uniform_recombine(g)
             resi_real = g      - tf.matmul(tf.matmul(g,      u), tf.transpose(u))
             resi_fake = g_fake - tf.matmul(tf.matmul(g_fake, u), tf.transpose(u))
@@ -400,14 +406,15 @@ class ConvAE(object):
             group_resi_real.append(resi_real)
             group_resi_fake.append(resi_fake)
         loss_u = tf.reduce_mean(group_loss_real)
+        loss_u = tf.check_numerics(loss_u, 'u_loss bad numerics')
         resi_real = tf.concat(group_resi_real, 0)
         resi_fake = tf.concat(group_resi_fake, 0)
         return loss_u, resi_real, resi_fake
 
     def compute_score_disc(self, resi_real, resi_fake):
-        score_real = self.discriminator(resi_real, reuse=False)
-        score_fake = self.discriminator(resi_fake, reuse=True)
-        return tf.reduce_sum(score_real - score_fake)
+        self.disc_score_real = tf.reduce_sum(self.discriminator(resi_real, reuse=False))
+        self.disc_score_fake = tf.reduce_sum(self.discriminator(resi_fake, reuse=True ))
+        return self.disc_score_real - self.disc_score_fake
 
     def regularization1(self, reuse=False):
         combined = []
@@ -444,7 +451,7 @@ class ConvAE(object):
     def assign_u_parameter(self, X, y):
         self.sess.run(self.u_ini,                   feed_dict={self.x:X, self.y_x:y})
 
-    def step1_assign_u(self, X, y, lr):
+    def step1_assign_u(self, X, y):
         self.sess.run(self.u_assign_op,             feed_dict={self.x:X, self.y_x:y})
 
     def step2_optimize_loss_u_combined(self, X, y, lr):
@@ -458,7 +465,7 @@ class ConvAE(object):
 
     def step5_optimize_loss_gen(self, X, y, lr):
         cost, Coef, summary, _ = self.sess.run(
-                [self.loss_recon, self.Coef, self.summaryop_eqn3plus, self.optimizer_gen,           
+                [self.loss_recon, self.Coef, self.summaryop_eqn3plus, self.optimizer_gen],           
                                                     feed_dict={self.x:X, self.y_x:y, self.learning_rate:lr})
         self.summary_writer.add_summary(summary, self.iter)
         self.iter += 1
@@ -499,6 +506,15 @@ class ConvAE(object):
     def check_size(self, X):
         z = self.sess.run(self.z, feed_dict={self.x: X})
         return z
+
+    def build_checkops(self):
+        checkops = []
+        for v in tf.trainable_variables():
+            checkops.append(tf.check_numerics(v, '{} failed check'.format(v.name)))
+        self.checkops = tf.group(*checkops)
+
+    def check_numerics(self):
+        self.sess.run(self.checkops)
 
 
 def best_map(L1, L2):
@@ -668,7 +684,7 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
     y_x_mode = 'svd'
     for epoch in xrange(1, num_epochs + 1):
         # eqn3
-        if epoch < args.enable_at:
+        if epoch <= args.enable_at:
             interval = args.interval  # normal interval
             cost, Coef = CAE.partial_fit_eqn3(Img, args.lr)
         # eqn3plus
@@ -676,12 +692,15 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
             interval = args.interval2  # GAN interval
             # step1
             CAE.step1_assign_u(Img, y_x)
-            for k2 in xrange(args.k2):
+            CAE.check_numerics()
+            for i in xrange(args.k2):
                 # step2
-                for k in xrange(args.k):
-                    CAE.step2_optimize_loss_u_combined(Img, args.lr2)
+                for j in xrange(args.k1):
+                    CAE.step2_optimize_loss_u_combined(Img, y_x, args.lr2)
+                    CAE.check_numerics()
                 # step3
                 CAE.step3_optimize_loss_ae_combined(Img, y_x, args.lr2)
+                CAE.check_numerics()
             # step 4
             for i in xrange(args.D_steps):
                 CAE.step4_optimize_loss_disc(Img, y_x, args.lr2)
