@@ -15,22 +15,23 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('name')  # name of experiment, used for creating log directory
-parser.add_argument('--lambda1', type=float, default=1.0)
-parser.add_argument('--lambda2', type=float, default=0.2)  # sparsity cost on C
+
+parser.add_argument('--lambda1', type=float, default=1.0)  # lambda on Coef's f-norm
+parser.add_argument('--lambda2', type=float, default=0.2)  # lambda on self-expressive loss
 parser.add_argument('--lambda3', type=float, default=1.0)  # lambda on score_disc in generator loss
-parser.add_argument('--lambda4', type=float, default=0.1)  # lambda on AE L2 regularization
+parser.add_argument('--lambda4', type=float, default=0.1)  # lambda on AE's weights L2 regularization
 parser.add_argument('--lambda5', type=float, default=0.1)  # lambda on loss_u in ae_loss_combined
 
 parser.add_argument('--lr',  type=float, default=1e-3)  # learning rate
 parser.add_argument('--lr2', type=float, default=2e-4)  # learning rate for discriminator and eqn3plus
 
 parser.add_argument('--pretrain', type=int, default=0)  # number of iterations of pretraining
-parser.add_argument('--epochs', type=int, default=1000)  # number of epochs to train on eqn3 and eqn3plus
+parser.add_argument('--epochs', type=int, default=1000) # number of epochs to train on eqn3 and eqn3plus
 parser.add_argument('--enable-at', type=int, default=300)  # epoch at which to enable eqn3plus
 parser.add_argument('--dataset', type=str, default='yaleb', choices=['yaleb', 'orl', 'coil20', 'coil100'])
 parser.add_argument('--interval', type=int, default=50)
 parser.add_argument('--interval2', type=int, default=1)
-parser.add_argument('--bound', type=float, default=0.02)  # discriminator weight clipping limit
+parser.add_argument('--bound', type=float, default=0.2)  # discriminator weight clipping limit
 parser.add_argument('--D-steps', type=int, default=1)
 parser.add_argument('--G-steps', type=int, default=1)
 parser.add_argument('--save', action='store_true')  # save pretrained model
@@ -42,14 +43,11 @@ parser.add_argument('--beta2', type=float, default=0.010)  # promote org of subs
 parser.add_argument('--beta3', type=float, default=0.010)  # promote org of subspaces' basis difference
 
 parser.add_argument('--stop-real', action='store_true')  # cut z_real path
-parser.add_argument('--stationary', type=int, default=1)  # update z_real every so generator epochs
 
-parser.add_argument('--submean',        action='store_true')
-parser.add_argument('--proj-cluster',   action='store_true')
-parser.add_argument('--usebn',          action='store_true')
+parser.add_argument('--submean',        action='store_true')    # subtract mean from each group before proceeding
 
-parser.add_argument('--no-uni-norm',    action='store_true')
-parser.add_argument('--one2one',      action='store_true')
+parser.add_argument('--no-uni-norm',    action='store_true')    # do not normalize recombination coefficient to norm 1
+parser.add_argument('--one2one',      action='store_true')      # use 1-to-1 matching
 parser.add_argument('--alpha',          type=float, default=0.1)
 
 parser.add_argument('--matfile',        default=None)
@@ -57,8 +55,8 @@ parser.add_argument('--imgmult',        type=float,     default=1.0)
 parser.add_argument('--palpha',         type=float,     default=None)
 parser.add_argument('--kernel-size',    type=int,       nargs='+',  default=None)
 
-parser.add_argument('--k1',             type=int,       default=1)
-parser.add_argument('--k2',             type=int,       default=1)
+parser.add_argument('--k1',             type=int,       default=1)  # step2 repeats
+parser.add_argument('--k2',             type=int,       default=1)  # step2&3 outter loop repeats
 
 """
 Example launch commands:
@@ -106,9 +104,6 @@ class ConvAE(object):
         # self-expressive layer
         z = tf.reshape(latent, [batch_size, -1])
         z.set_shape([batch_size, self.latent_size])
-
-        if args.usebn:
-            z = tf.contrib.layers.batch_norm(z)
 
         if r == 0:
             Coef = tf.Variable(1.0e-4 * tf.ones([self.batch_size, self.batch_size], tf.float32), name='Coef')
@@ -200,6 +195,7 @@ class ConvAE(object):
         print 'building optimizer for discriminator'
         with tf.variable_scope('optimizer_disc'):
             self.optimizer_disc = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss_disc, var_list=disc_weights) 
+        self.clip_weight = [v.assign(tf.clip_by_value(v, -disc_bound, disc_bound)) for v in disc_weights]
 
         # step5
         print 'building optimizer for generator'
@@ -228,8 +224,6 @@ class ConvAE(object):
         self.sess.run(self.init)
         self.saver = tf.train.Saver([v for v in ae_weights if v.name.startswith('enc_w') or v.name.startswith('dec_w')])
         self.summary_writer = tf.summary.FileWriter(logs_path, graph=tf.get_default_graph(), flush_secs=20)
-        # DEBUG
-        self.build_checkops()
 
     # Building the encoder
     def encoder(self, x):
@@ -406,7 +400,6 @@ class ConvAE(object):
             group_resi_real.append(resi_real)
             group_resi_fake.append(resi_fake)
         loss_u = tf.reduce_mean(group_loss_real)
-        loss_u = tf.check_numerics(loss_u, 'u_loss bad numerics')
         resi_real = tf.concat(group_resi_real, 0)
         resi_fake = tf.concat(group_resi_fake, 0)
         return loss_u, resi_real, resi_fake
@@ -461,7 +454,7 @@ class ConvAE(object):
         self.sess.run(self.optimizer_ae_combined,   feed_dict={self.x:X, self.y_x:y, self.learning_rate:lr})
 
     def step4_optimize_loss_disc(self, X, y, lr):
-        self.sess.run(self.optimizer_disc,          feed_dict={self.x:X, self.y_x:y, self.learning_rate:lr})
+        self.sess.run([self.optimizer_disc] + self.clip_weight,          feed_dict={self.x:X, self.y_x:y, self.learning_rate:lr})
 
     def step5_optimize_loss_gen(self, X, y, lr):
         cost, Coef, summary, _ = self.sess.run(
@@ -506,15 +499,6 @@ class ConvAE(object):
     def check_size(self, X):
         z = self.sess.run(self.z, feed_dict={self.x: X})
         return z
-
-    def build_checkops(self):
-        checkops = []
-        for v in tf.trainable_variables():
-            checkops.append(tf.check_numerics(v, '{} failed check'.format(v.name)))
-        self.checkops = tf.group(*checkops)
-
-    def check_numerics(self):
-        self.sess.run(self.checkops)
 
 
 def best_map(L1, L2):
@@ -692,15 +676,12 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5):
             interval = args.interval2  # GAN interval
             # step1
             CAE.step1_assign_u(Img, y_x)
-            CAE.check_numerics()
             for i in xrange(args.k2):
                 # step2
                 for j in xrange(args.k1):
                     CAE.step2_optimize_loss_u_combined(Img, y_x, args.lr2)
-                    CAE.check_numerics()
                 # step3
                 CAE.step3_optimize_loss_ae_combined(Img, y_x, args.lr2)
-                CAE.check_numerics()
             # step 4
             for i in xrange(args.D_steps):
                 CAE.step4_optimize_loss_disc(Img, y_x, args.lr2)
