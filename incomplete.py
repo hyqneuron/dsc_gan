@@ -20,17 +20,17 @@ parser.add_argument('name')
 parser.add_argument('--lambda1', type=float, default=1.0)
 # according to the paper, for yale lambda2=6.3096, for coil 20 and 100, lambda2=30.0, for orl, lambda2=0.2
 parser.add_argument('--lambda2', type=float, default=0.20)  # sparsity cost on C
-parser.add_argument('--lambda3', type=float, default=1.0)  # lambda on gan loss
+parser.add_argument('--lambda3', type=float, default=1.0)   # lambda on k-means
 parser.add_argument('--lambda4', type=float, default=0.000001)# lambda on AE L2 regularization
-
+parser.add_argument('--hardness',type=float, default=1.0)   # hardness on k-means
 
 parser.add_argument('--lr',  type=float, default=1e-3)  # learning rate
 
 parser.add_argument('--pretrain', type=int, default=0)  # number of iterations of pretraining
-parser.add_argument('--epochs', type=int, default=1000)  # number of epochs to train on eqn3 and eqn3plus
-parser.add_argument('--enable-at', type=int, default=300)  # epoch at which to enable eqn3plus
+parser.add_argument('--epochs', type=int, default=500)  # number of epochs to train on eqn3 and eqn3
+parser.add_argument('--epochs2',type=int, default=500)  # number of epochs to train on eqn3 and eqn3plus
 parser.add_argument('--dataset', type=str, default='orl', choices=['yaleb', 'orl', 'coil20', 'coil100'])
-parser.add_argument('--interval', type=int, default=10)
+parser.add_argument('--interval', type=int, default=100)
 parser.add_argument('--save', action='store_true')  # save pretrained model
 
 parser.add_argument('--usebn',          action='store_true')
@@ -57,8 +57,8 @@ class ConvAE(object):
     def __init__(self,
                  args,
                  n_input, n_hidden, kernel_size, n_class, n_sample_perclass, 
-                 lambda1, lambda2, lambda3, batch_size,
-                 reg=None, disc_bound=0.02,
+                 lambda1, lambda2, lambda3, batch_size, hardness,
+                 reg=None,
                  model_path=None, restore_path=None,
                  logs_path='logs'):
         self.args = args
@@ -81,8 +81,8 @@ class ConvAE(object):
         latent      spatial code
         """
         # input required to be fed
-        self.x    = tf.placeholder(tf.float32, [None, n_input[0], n_input[1], 1])
-        self.mask = tf.placeholder(tf.float32, self.x.shape)
+        self.x    = tf.placeholder(tf.float32, [None, n_input[0], n_input[1], 1], name='X')
+        self.mask = tf.placeholder(tf.float32, self.x.shape, name='mask')
         self.learning_rate = tf.placeholder(tf.float32, [])
 
         # run input through encoder, latent is the output, shape is the shape of encoder
@@ -138,7 +138,6 @@ class ConvAE(object):
         """
         diff = tf.subtract(self.x_r, self.x)
         self.loss_recon = 0.5 * tf.reduce_sum(tf.pow(diff * self.mask, 2.0))
-        #self.loss_sparsity = tf.reduce_sum(tf.pow(self.Coef, 2.0))
         self.loss_sparsity = tf.reduce_sum(tf.abs(self.Coef))
         self.loss_selfexpress = 0.5 * tf.reduce_sum(tf.pow(tf.subtract(z_c, z), 2.0))
         self.loss_eqn3 = self.loss_recon + lambda1 * self.loss_sparsity + lambda2 * self.loss_selfexpress + self.loss_aereg
@@ -149,8 +148,9 @@ class ConvAE(object):
         Eqn3+
         """
         # Eqn 3 + K-means
-        kmeans_weight, sumdiff, membership = self.kmeans(z, init_centroids)
-        self.kmeans_assign 
+        kmeans_weight, sumdiff, membership = self.kmeans(z, Coef, hardness)
+        self.kmeans_init_weight = tf.placeholder(tf.float32, kmeans_weight.shape)
+        self.kmeans_assign_op = kmeans_weight.assign(self.kmeans_init_weight)
         self.loss_kmeans = tf.reduce_sum(tf.multiply(sumdiff, membership))
         self.loss_eqn3plus = self.loss_eqn3 + lambda3 * self.loss_kmeans
         eqn3plus_weights = eqn3_weights + [kmeans_weight]
@@ -160,18 +160,18 @@ class ConvAE(object):
         # finalize stuffs
         self.ae_weight_norm = tf.sqrt(sum([tf.norm(v, 2) ** 2 for v in ae_weights]))
         s0 = tf.summary.scalar("loss_recon_pre",    self.loss_recon_pre / batch_size)  # 13372
-        s1 = tf.summary.scalar("loss_recon",        self.loss_recon)
-        s2 = tf.summary.scalar("loss_sparsity",     self.loss_sparsity)
-        s3 = tf.summary.scalar("loss_selfexpress",  self.loss_selfexpress)
-        s5 = tf.summary.scalar("ae_l2_norm",        self.ae_weight_norm)  # 29.8
-        s6 = tf.summary.scalar("loss_kmeans",       self.loss_kmeans)
-        self.summaryop_pretrain = tf.summary.merge([s0, s5])
-        self.summaryop_eqn3     = tf.summary.merge([s1, s2, s3, s5])
-        self.summaryop_eqn3plus = tf.summary.merge([s1, s2, s3, s4, s5, s6, s7])
+        s1 = tf.summary.scalar("ae_l2_norm",        self.ae_weight_norm)  # 29.8
+        s2 = tf.summary.scalar("loss_recon",        self.loss_recon)
+        s3 = tf.summary.scalar("loss_sparsity",     self.loss_sparsity)
+        s4 = tf.summary.scalar("loss_selfexpress",  self.loss_selfexpress)
+        s5 = tf.summary.scalar("loss_kmeans",       self.loss_kmeans)
+        self.summaryop_pretrain = tf.summary.merge([s0, s1])
+        self.summaryop_eqn3     = tf.summary.merge([s1, s2, s3, s4])
+        self.summaryop_eqn3plus = tf.summary.merge([s1, s2, s3, s4, s5])
         self.init = tf.global_variables_initializer()
         config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True  # stop TF from eating up all GPU RAM
-        config.gpu_options.per_process_gpu_memory_fraction = 0.4
+        #config.gpu_options.allow_growth = True  # stop TF from eating up all GPU RAM
+        #config.gpu_options.per_process_gpu_memory_fraction = 0.4
         self.sess = tf.InteractiveSession(config=config)
         self.sess.run(self.init)
         self.saver = tf.train.Saver([v for v in ae_weights if v.name.startswith('enc_w') or v.name.startswith('dec_w')])
@@ -213,38 +213,46 @@ class ConvAE(object):
                 input = dec_i
         return input
 
-    def kmeans(self, z, init_centroids):
-        assert init_centroids.shape == (self.n_class, self.latent_size)
+    def kmeans(self, z, Coef, hardness):
         with tf.variable_scope('kmeans'):
-            kmeans_weights = tf.get_variable('centroids', shape=[self.n_class, self.latent_size])
-        self.kmeans_weights = kmeans_weights
-        ez = tf.expand_dims(z, 1)               # N, 1, D
-        ek = tf.expand_dims(kmeans_weights, 0)  # 1, K, D
-        diff = tf.pow(ez - ek, 2)
+            kmeans_weight = tf.get_variable('centroids', shape=[self.n_class, self.batch_size])
+        self.kmeans_weight = kmeans_weight
+        ez = tf.expand_dims(Coef, 1)            # N, 1, N
+        ek = tf.expand_dims(kmeans_weight, 0)  # 1, K, N
+        diff = tf.pow(ez - ek, 2)               # N, K, N
         sumdiff = tf.reduce_sum(diff, 2)        # N, K
-        membership = tf.nn.softmax(sumdiff)
-        return [kmeans_weights], sumdiff, membership
+        membership = tf.nn.softmax(-sumdiff * hardness)
+        return kmeans_weight, sumdiff, membership
 
-    def partial_fit_eqn3(self, X, lr):
+    def initialize_kmeans(self, Coef, y_x):
+        initval = np.zeros([self.n_class, self.batch_size])
+        for k in xrange(self.n_class):
+            indices = np.argwhere(y_x==k)
+            rows = Coef[indices]
+            print rows.shape
+            initval[k] = rows.mean(0)
+        self.sess.run([self.kmeans_assign_op], feed_dict={self.kmeans_init_weight: initval})
+
+    def partial_fit_eqn3(self, X, mask, lr):
         # take a step on Eqn 3/4
         cost, Coef, summary, _ = self.sess.run((self.loss_recon, self.Coef, self.summaryop_eqn3, self.optimizer_eqn3),
-                                               feed_dict={self.x: X, self.learning_rate: lr})
+                                               feed_dict={self.x: X, self.mask:mask, self.learning_rate: lr})
         self.summary_writer.add_summary(summary, self.iter)
         self.iter += 1
         return cost, Coef
 
-    def partial_fit_eqn3plus(self, X, y_x, lr):
+    def partial_fit_eqn3plus(self, X, mask, lr):
         # assert y_x.min() == 0, 'y_x is 0-based'
-        cost, Coef, summary, _, _ = self.sess.run(
-            [self.loss_recon, self.Coef, self.summaryop_eqn3plus, self.optimizer_eqn3plus, self.gen_step_op],
-            feed_dict={self.x: X, self.y_x: y_x, self.learning_rate: lr})
+        cost, Coef, summary, _ = self.sess.run(
+            [self.loss_recon, self.Coef, self.summaryop_eqn3plus, self.optimizer_eqn3plus],
+            feed_dict={self.x: X, self.mask:mask, self.learning_rate: lr})
         self.summary_writer.add_summary(summary, self.iter)
         self.iter += 1
         return cost, Coef
 
-    def partial_fit_pretrain(self, X, lr):
+    def partial_fit_pretrain(self, X, mask, lr):
         cost, summary, _ = self.sess.run([self.loss_recon_pre, self.summaryop_pretrain, self.optimizer_pre],
-                                         feed_dict={self.x: X, self.learning_rate: lr})
+                feed_dict={self.x: X, self.mask:mask, self.learning_rate: lr})
         self.summary_writer.add_summary(summary, self.iter)
         self.iter += 1
         return cost
@@ -401,7 +409,13 @@ def build_laplacian(C):
     return L
 
 
-def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5, alpha = 0.1):
+def reinit_and_optimize(args, Img, Mask, Label, CAE, n_class, k=10, post_alpha=3.5, alpha = 0.1):
+    """
+    1. pretrain
+    2. train on eqn3
+    3. initialize K-means
+    4. train on eqn3+
+    """
 
     best_epoch=0
     best_acc=0
@@ -441,7 +455,8 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5, al
             minibatch_size = 128
             indices = np.random.permutation(Img.shape[0])[:minibatch_size]
             minibatch = Img[indices]  # pretrain with random mini-batch
-            cost = CAE.partial_fit_pretrain(minibatch, args.lr) # FIXME provide mask
+            mask      = Mask[indices]
+            cost = CAE.partial_fit_pretrain(minibatch, mask, args.lr) # FIXME provide mask
             if epoch % 100 == 0:
                 norm = CAE.get_ae_weight_norm()
                 print('pretraining epoch {}, cost: {}, norm: {}'.format(epoch, cost / float(minibatch_size), norm))
@@ -454,29 +469,51 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5, al
     acc_x = 0.0
     y_x_mode = 'svd'
     for epoch in range(1, num_epochs + 1):
-        # eqn3
-        if epoch < args.enable_at:
-            cost, Coef = CAE.partial_fit_eqn3(Img, args.lr) # FIXME provide mask
-        # every interval epochs, perform clustering and evaluate accuracy
+        cost, Coef = CAE.partial_fit_eqn3(Img, Mask, args.lr) # FIXME provide mask
         if epoch % args.interval == 0:
-            print("epoch: %.1d" % epoch, "cost: %.8f" % (cost / float(batch_size)))
-            Coef = thrC(Coef, alpha)
-            t_begin = time.time()
-            print('================================================')
-            print('Warning: clustering produced empty clusters')
-            print('================================================')
+            print "epoch: %.1d" % epoch, "cost: %.8f" % (cost/float(batch_size))
+            Coef = thrC(Coef,alpha)
+            y_x_new, _ = post_proC(Coef, n_class, k, post_alpha)
+            if len(set(list(np.squeeze(y_x_new)))) == n_class:
+                y_x = y_x_new
+            else:
+                print '================================================'
+                print 'Warning: clustering produced empty clusters'
+                print '================================================'
             missrate_x = err_rate(Label, y_x)
-            t_end = time.time()
             acc_x = 1 - missrate_x
-            print("accuracy: {}".format(acc_x))
-            print('post processing time: {}'.format(t_end - t_begin))
+            print "accuracy: {}".format(acc_x)
             CAE.log_accuracy(acc_x)
-            clustered = True
-            #if epoch < 300 and acc_x> 0.85 and acc_x<0.865:
-            #   sio.savemat('orl_label_nisp4.mat', dict(s=y_x_new))
-            if best_acc < acc_x:
-               best_acc = acc_x
-               sio.savemat('orl_label_nips_l1.mat', dict(s=y_x_new))
+
+    ###
+    ### Stage 3: initialize k-means
+    ###
+    CAE.initialize_kmeans(Coef, y_x)
+
+    ###
+    ### Stage 4: train on eqn3+
+    ###
+
+    print 'Eqn3+kmeans training for {} epochs'.format(args.epochs2)
+
+
+    for epoch in range(1, args.epochs2+1):
+        cost, Coef = CAE.partial_fit_eqn3plus(Img, Mask, args.lr)
+        if epoch % args.interval == 0:
+            print 'epoch {}, cost {:.2f}'.format(epoch, cost)
+            Coef = thrC(Coef,alpha)
+            y_x_new, _ = post_proC(Coef, n_class, k, post_alpha)
+            if len(set(list(np.squeeze(y_x_new)))) == n_class:
+                y_x = y_x_new
+            else:
+                print '================================================'
+                print 'Warning: clustering produced empty clusters'
+                print '================================================'
+            missrate_x = err_rate(Label, y_x)
+            acc_x = 1 - missrate_x
+            print "accuracy: {}".format(acc_x)
+            CAE.log_accuracy(acc_x)
+
 
     mean = acc_x
     median = acc_x
@@ -485,9 +522,26 @@ def reinit_and_optimize(args, Img, Label, CAE, n_class, k=10, post_alpha=3.5, al
     return (1 - mean), (1 - median), best_epoch, best_acc, best_alpha, best_postalpha
 
 
+def evaluate_accuracy_on_coef(coef, Label, alpha, n_class, post_alpha):
+    Coef = thrC(Coef,alpha)
+    t_begin = time.time()
+    y_x_new, _ = post_proC(Coef, n_class, k, post_alpha)
+    if len(set(list(np.squeeze(y_x_new)))) == n_class:
+        y_x = y_x_new
+    else:
+        print '================================================'
+        print 'Warning: clustering produced empty clusters'
+        print '================================================'
+    missrate_x = err_rate(Label, y_x)
+    t_end = time.time()
+    acc_x = 1 - missrate_x
+    print "accuracy: {}".format(acc_x)
+
+
 def prepare_data_YaleB(folder):
     # load face images and labels
-    mat = sio.loadmat(os.path.join(folder, 'Yale.mat'))
+    mat = sio.loadmat(os.path.join(folder, 'YaleBCrop025.mat'))
+    #mat = sio.loadmat(os.path.join(folder, 'Yale.mat'))
     img = mat['Y']
 
     # Reorganize data a bit, put images into Img, and labels into Label
@@ -520,8 +574,8 @@ def prepare_data_YaleB(folder):
 
 
 def prepare_data_orl(folder):
-    mat = sio.loadmat(os.path.join(folder, 'ORL.mat'))
-    Label = mat['gnd'].reshape(400).astype(np.int32)
+    mat = sio.loadmat(os.path.join(folder, 'ORL2fea.mat'))
+    Label = mat['label'].reshape(400).astype(np.int32)
     Img = mat['fea'].reshape(400, 32, 32, 1)
 
     # constants
@@ -604,6 +658,7 @@ if __name__ == '__main__':
     alpha, Img, Label, n_input, n_hidden, kernel_size, n_sample_perclass, disc_size, k, post_alpha, all_subjects, model_path = \
             preparation_funcs[args.dataset](folder)
     Img = Img*args.imgmult
+    Mask = np.random.binomial(1, 0.99, Img.shape)
     post_alpha = args.palpha or post_alpha
     logs_path = os.path.join(folder, 'logs', args.name)
     restore_path = model_path
@@ -625,12 +680,12 @@ if __name__ == '__main__':
         CAE = ConvAE(
             args,
             n_input, n_hidden, kernel_size, n_class, n_sample_perclass, 
-            lambda1, lambda2, lambda3, batch_size, 
-            reg=tf.contrib.layers.l2_regularizer(tf.ones(1) * args.lambda4), disc_bound=args.bound,
+            lambda1, lambda2, lambda3, batch_size, args.hardness,
+            reg=tf.contrib.layers.l2_regularizer(tf.ones(1) * args.lambda4), 
             model_path=model_path, restore_path=restore_path, logs_path=logs_path)
 
         # perform optimization
-        avg_i, med_i, best_epoch, best_acc, best_alpha, best_postalpha = reinit_and_optimize(args, Img, Label, CAE, n_class, k=k, post_alpha=post_alpha, alpha = alpha)
+        avg_i, med_i, best_epoch, best_acc, best_alpha, best_postalpha = reinit_and_optimize(args, Img, Mask, Label, CAE, n_class, k=k, post_alpha=post_alpha, alpha = alpha)
         # add result to list
         avg.append(avg_i)
         med.append(med_i)
